@@ -1,0 +1,11 @@
+[package]
+name = "wallbash"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ash = "0.38"
+image = "0.25"
+wayland-client = "0.31.14"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-backend = { version = "0.3", features = ["client_system"] }
