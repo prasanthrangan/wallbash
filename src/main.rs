@@ -9,26 +9,46 @@
 pub mod wallbashed;
 pub mod wayland;
 pub mod vulkan;
-use std::env;
-use std::io::Write;
-use std::os::unix::net::UnixStream;
+use std::{
+    env, io::Write,
+    os::unix::net::UnixStream,
+    process::Command,
+    thread::sleep,
+    time::Duration,
+};
 const SOCKET_PATH: &str = "/tmp/wallbash.sock";
+const LOG_PATH: &str = "/tmp/wallbash.log";
 
 
-// --------------------------------------------------------------------- / funtioon
+// --------------------------------------------------------------------- / funtions
+
+fn print_usage() {
+    eprintln!("[Usage]");
+    eprintln!("  wallbash start             |  Start the wallpaper daemon");
+    eprintln!("  wallbash set <image_path>  |  Set the wallpaper");
+    eprintln!("  wallbash stop              |  Stop the daemon");
+    eprintln!("  wallbash status            |  Show daemon status");
+}
+
+fn check_daemon() -> bool {
+    UnixStream::connect(SOCKET_PATH).is_ok()
+}
+
+fn wait_loop() -> Result<(), Box<dyn std::error::Error>> {
+    let max_attempts = 50;          // 50 × 100 ms = 5 seconds
+    for _ in 0..max_attempts {
+        if check_daemon() {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100));
+    }
+    Err("Daemon did not start within 5 seconds".into())
+}
 
 fn send_command(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = UnixStream::connect(SOCKET_PATH)?;
     writeln!(stream, "{}", cmd)?;
     Ok(())
-}
-
-fn print_usage() {
-    eprintln!("[Usage]");
-    eprintln!("  wallbash start              Start the wallpaper daemon");
-    eprintln!("  wallbash set <image_path>   Set the wallpaper");
-    eprintln!("  wallbash stop               Stop the daemon");
-    eprintln!("  wallbash status             Show daemon status");
 }
 
 
@@ -43,12 +63,10 @@ fn main() {
 
     match args[1].as_str() {
         "start" => {
-            // Check if already running
-            if UnixStream::connect(SOCKET_PATH).is_ok() {
+            if check_daemon() {
                 eprintln!("Daemon is already running.");
                 return;
             }
-            // Start the daemon (this will block until stopped)
             if let Err(e) = wallbashed::run(SOCKET_PATH) {
                 eprintln!("Failed to start daemon: {}", e);
             }
@@ -57,6 +75,21 @@ fn main() {
             if args.len() < 3 {
                 eprintln!("Missing image path.");
                 return;
+            }
+            if !check_daemon() {
+                println!("Starting daemon");
+                let log_file = std::fs::File::create(LOG_PATH).expect("Cannot create log");
+                let mut child = Command::new(env::current_exe().unwrap())
+                    .arg("start")
+                    .stdout(log_file.try_clone().unwrap())
+                    .stderr(log_file)
+                    .spawn()
+                    .expect("Failed to start daemon");
+                if let Err(e) = wait_loop() {
+                    eprintln!("Error: {}", e);
+                    let _ = child.kill();
+                    return;
+                }
             }
             let cmd = format!("set {}", args[2]);
             if let Err(e) = send_command(&cmd) {
@@ -69,9 +102,10 @@ fn main() {
             }
         }
         "status" => {
-            match UnixStream::connect(SOCKET_PATH) {
-                Ok(_) => println!("Daemon is running."),
-                Err(_) => println!("Daemon is not running."),
+            if check_daemon() {
+                println!("Daemon is running.");
+            } else {
+                println!("Daemon is not running.");
             }
         }
         _ => print_usage(),

@@ -41,6 +41,7 @@ pub struct Monitor {
     width: i32,
     height: i32,
     refresh: i32,
+    detected: bool,
 }
 
 
@@ -76,6 +77,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                         width: 0,
                         height: 0,
                         refresh: 0,
+                        detected: false,
                     });
                     println!("[{}] ✓ {} (v{})", name, interface, version);
                 }
@@ -127,11 +129,14 @@ impl Dispatch<wl_output::WlOutput, usize> for AppData {
                 monitor.name = Some(name);
             }
             wl_output::Event::Done => {
-                println!("[{}] monitor: {}x{}@{:.1}Hz ({})", index,
-                monitor.width,
-                monitor.height,
-                monitor.refresh as f32 / 1000.0,
-                monitor.name.as_deref().unwrap_or("unknown"));
+                if !monitor.detected {
+                    println!("[{}] monitor: {}x{}@{:.1}Hz ({})", index,
+                    monitor.width,
+                    monitor.height,
+                    monitor.refresh as f32 / 1000.0,
+                    monitor.name.as_deref().unwrap_or("unknown"));
+                    monitor.detected = true;
+                }
             }
             _ => {}
         }

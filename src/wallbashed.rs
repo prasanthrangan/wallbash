@@ -14,14 +14,6 @@ use std::{
 };
 
 
-// --------------------------------------------------------------------- / datatypes
-
-enum Command {
-    Set(String),
-    Stop,
-}
-
-
 // --------------------------------------------------------------------- / socket
 
 fn start_ipc(socket_path: &str) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
@@ -157,35 +149,31 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         // check for commands from the IPC
         if let Ok(raw) = rx.try_recv() {
             let raw = raw.trim().to_string();
-            println!("[wallbash] loading {}", raw);
+            println!("[wallbash] received {}", raw);
 
-            let cmd = if raw == "stop" {
-                Command::Stop
+            if raw == "stop" {
+                println!("[wallbash] stopping daemon.");
+                running = false;
             } else if raw.starts_with("set ") {
                 let path = raw[4..].trim().to_string();
-                Command::Set(path)
-            } else {
-                Command::Set(raw)
-            };
+                let resolved = std::fs::canonicalize(&path)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or(path);
 
-            match cmd {
-                Command::Set(path) => {
-                    match set_wallpaper(
-                        &path,
-                        &vk_core,
-                        &vk_surfchain,
-                        wl_core.state.layer_width,
-                        wl_core.state.layer_height,
-                        &mut wallpaper,
-                    ) {
-                        Ok(()) => println!("[wallbash] wallpaper set..."),
-                        Err(e) => eprintln!("[wallbash] error {}", e),
-                    }
+                println!("[wallbash] loading {}", resolved);
+                match set_wallpaper(
+                    &resolved,
+                    &vk_core,
+                    &vk_surfchain,
+                    wl_core.state.layer_width,
+                    wl_core.state.layer_height,
+                    &mut wallpaper,
+                ) {
+                    Ok(()) => println!("[wallbash] wallpaper set."),
+                    Err(e) => eprintln!("[wallbash] error {}", e),
                 }
-                Command::Stop => {
-                    println!("[wallbash] stopping daemon...");
-                    running = false;
-                }
+            } else {
+                eprintln!("[wallbash] unknown {}", raw);
             }
         }
 
