@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 const SOCKET_PATH: &str = "/tmp/wallbash.sock";
-const LOG_PATH: &str = "/tmp/wallbash.log";
+const LOG_FILE: &str = "/tmp/wallbash.log";
 
 
 // --------------------------------------------------------------------- / funtions
@@ -78,7 +78,7 @@ fn main() {
             }
             if !check_daemon() {
                 println!("Starting daemon");
-                let log_file = std::fs::File::create(LOG_PATH).expect("Cannot create log");
+                let log_file = std::fs::File::create(LOG_FILE).expect("Cannot create log");
                 let mut child = Command::new(env::current_exe().unwrap())
                     .arg("start")
                     .stdout(log_file.try_clone().unwrap())

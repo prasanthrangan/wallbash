@@ -14,7 +14,7 @@ use std::{
 };
 
 
-// --------------------------------------------------------------------- / socket
+// --------------------------------------------------------------------- / listener
 
 fn start_ipc(socket_path: &str) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
 
@@ -75,7 +75,8 @@ fn set_wallpaper(
         &vk_core.device,
         vk_core.physical_device,
         vk_core.graphics_queue,
-        vk_core.graphics_family_index,
+        vk_core.command_pool,
+        vk_core.command_buffer,
         &pixel_bytes,
         img.width(),
         img.height(),
@@ -96,7 +97,8 @@ fn set_wallpaper(
         &vk_core.instance,
         &vk_core.device,
         vk_core.graphics_queue,
-        vk_core.graphics_family_index,
+        vk_core.command_pool,
+        vk_core.command_buffer,
         vk_surfchain.swapchain,
         &vk_surfchain.swapchain_images,
         wallpaper.as_ref().unwrap().image,
@@ -126,10 +128,11 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     // init vulkan
     let vk_core = vulkan::vulkan_core()?;
-    let vk_surfchain = vulkan::vulkan_surfchain(
+    let mut vk_surfchain = vulkan::vulkan_surfchain(
         &vk_core.entry,
         &vk_core.instance,
         vk_core.physical_device,
+        vk_core.graphics_family_index,
         &vk_core.device,
         &wl_core.display,
         &wl_core.surface,
@@ -170,6 +173,45 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     &mut wallpaper,
                 ) {
                     Ok(()) => println!("[wallbash] wallpaper set."),
+                    Err(e) if e.to_string().contains("out of date") => {
+                        println!("[wallbash] swapchain out of date, recreating...");
+                        // destroy old swapchain and surface
+                        vulkan::destroy_surfchain(
+                            &vk_core.entry,
+                            &vk_core.instance,
+                            &vk_core.device,
+                            &mut vk_surfchain,
+                        );
+                        // create a new one with the current layer dimensions
+                        vk_surfchain = match vulkan::vulkan_surfchain(
+                            &vk_core.entry,
+                            &vk_core.instance,
+                            vk_core.physical_device,
+                            vk_core.graphics_family_index,
+                            &vk_core.device,
+                            &wl_core.display,
+                            &wl_core.surface,
+                            wl_core.state.layer_width,
+                            wl_core.state.layer_height,
+                        ) {
+                            Ok(sc) => sc,
+                            Err(e2) => {
+                                eprintln!("[wallbash] failed to recreate swapchain {}", e2);
+                                continue;
+                            }
+                        };
+                        // retry setting the wallpaper once
+                        if let Err(e3) = set_wallpaper(
+                            &resolved,
+                            &vk_core,
+                            &vk_surfchain,
+                            wl_core.state.layer_width,
+                            wl_core.state.layer_height,
+                            &mut wallpaper,
+                        ) {
+                            eprintln!("[wallbash] error after swapchain recreation {}", e3);
+                        }
+                    }
                     Err(e) => eprintln!("[wallbash] error {}", e),
                 }
             } else {
@@ -188,10 +230,10 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             vk_core.device.free_memory(tex._memory, None);
         }
     }
-    unsafe {
-        vk_core.device.destroy_device(None);
-        vk_core.instance.destroy_instance(None);
-    }
+    vulkan::destroy_surfchain(&vk_core.entry, &vk_core.instance, &vk_core.device, &mut vk_surfchain);
+    unsafe { vk_core.device.destroy_command_pool(vk_core.command_pool, None); }
+    unsafe { vk_core.device.destroy_device(None); }
+    unsafe { vk_core.instance.destroy_instance(None); }
 
     println!("[wallbash] daemon stopped.");
     Ok(())
