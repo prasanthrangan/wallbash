@@ -1,6 +1,6 @@
 // --------------------------------------------------------------------- / tittu
 // wallbash
-// a minimal wallpaper engine for HyDE
+// a fast and minimal wallpaper engine for HyDE
 //
 
 
