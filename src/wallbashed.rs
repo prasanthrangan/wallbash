@@ -85,7 +85,6 @@ fn set_wallpaper(
     // drop the old texture resources (if any)
     if let Some(old_tex) = wallpaper.take() {
         unsafe {
-            vk_core.device.destroy_image_view(old_tex._view, None);
             vk_core.device.destroy_image(old_tex.image, None);
             vk_core.device.free_memory(old_tex._memory, None);
         }
@@ -175,6 +174,7 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     Ok(()) => println!("[wallbash] wallpaper set."),
                     Err(e) if e.to_string().contains("out of date") => {
                         println!("[wallbash] swapchain out of date, recreating...");
+
                         // destroy old swapchain and surface
                         vulkan::destroy_surfchain(
                             &vk_core.entry,
@@ -182,6 +182,7 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                             &vk_core.device,
                             &mut vk_surfchain,
                         );
+
                         // create a new one with the current layer dimensions
                         vk_surfchain = match vulkan::vulkan_surfchain(
                             &vk_core.entry,
@@ -200,6 +201,7 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                         };
+
                         // retry setting the wallpaper once
                         if let Err(e3) = set_wallpaper(
                             &resolved,
@@ -222,10 +224,10 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
 
-    // clean shutdowon 
+    // clean shutdowon
+    unsafe { vk_core.device.device_wait_idle()?; }
     if let Some(tex) = wallpaper.take() {
         unsafe {
-            vk_core.device.destroy_image_view(tex._view, None);
             vk_core.device.destroy_image(tex.image, None);
             vk_core.device.free_memory(tex._memory, None);
         }

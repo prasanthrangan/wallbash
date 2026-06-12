@@ -24,10 +24,10 @@ const LOG_FILE: &str = "/tmp/wallbash.log";
 
 fn print_usage() {
     eprintln!("[Usage]");
-    eprintln!("  wallbash start             |  Start the wallpaper daemon");
-    eprintln!("  wallbash set <image_path>  |  Set the wallpaper");
-    eprintln!("  wallbash stop              |  Stop the daemon");
-    eprintln!("  wallbash status            |  Show daemon status");
+    eprintln!("  wallbash start                  |  Start the wallpaper daemon");
+    eprintln!("  wallbash set /path/to/wall.img  |  Set the wallpaper");
+    eprintln!("  wallbash stop                   |  Stop the daemon");
+    eprintln!("  wallbash status                 |  Show daemon status");
 }
 
 fn check_daemon() -> bool {
@@ -35,14 +35,13 @@ fn check_daemon() -> bool {
 }
 
 fn wait_loop() -> Result<(), Box<dyn std::error::Error>> {
-    let max_attempts = 50;          // 50 × 100 ms = 5 seconds
-    for _ in 0..max_attempts {
+    for _ in 0..100 {
         if check_daemon() {
             return Ok(());
         }
         sleep(Duration::from_millis(100));
     }
-    Err("Daemon did not start within 5 seconds".into())
+    Err("Waiting for daemon...".into())
 }
 
 fn send_command(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -68,7 +67,7 @@ fn main() {
                 return;
             }
             if let Err(e) = wallbashed::run(SOCKET_PATH) {
-                eprintln!("Failed to start daemon: {}", e);
+                eprintln!("Failed to start daemon {}", e);
             }
         }
         "set" => {
@@ -86,19 +85,19 @@ fn main() {
                     .spawn()
                     .expect("Failed to start daemon");
                 if let Err(e) = wait_loop() {
-                    eprintln!("Error: {}", e);
+                    eprintln!("Error {}", e);
                     let _ = child.kill();
                     return;
                 }
             }
             let cmd = format!("set {}", args[2]);
             if let Err(e) = send_command(&cmd) {
-                eprintln!("Failed to set wallpaper: {}. Is the daemon running?", e);
+                eprintln!("Failed to set wallpaper {}. Is the daemon running?", e);
             }
         }
         "stop" => {
             if let Err(e) = send_command("stop") {
-                eprintln!("Failed to stop daemon: {}. Is it running?", e);
+                eprintln!("Failed to stop daemon {}. Is it running?", e);
             }
         }
         "status" => {
