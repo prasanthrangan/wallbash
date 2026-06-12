@@ -64,6 +64,7 @@ fn set_wallpaper(
     wallpaper: &mut Option<vulkan::VulkanTexture>,
     anchor_x: f32,
     anchor_y: f32,
+    mode: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     // load the wallpaper
@@ -109,6 +110,7 @@ fn set_wallpaper(
         layer_height,
         anchor_x,
         anchor_y,
+        mode,
     )?;
 
     Ok(())
@@ -160,16 +162,17 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             if raw == "stop" {
                 println!("[wallbash] stopping daemon.");
                 running = false;
-            } else if raw.starts_with("set ") {
-                let args: Vec<&str> = raw[4..].trim().split_whitespace().collect();
-                let path = args[..args.len()-2].join(" ");
-                let anchor_x: f32 = args[args.len()-2].parse().unwrap_or(0.5);
-                let anchor_y: f32 = args[args.len()-1].parse().unwrap_or(0.5);
+            } else if raw.starts_with("set") {
+                let args: Vec<&str> = raw[3..].split('\x01').collect();
+                let mode = args[0].to_string();
+                let anchor_x: f32 = args[1].parse().unwrap_or(0.5);
+                let anchor_y: f32 = args[2].parse().unwrap_or(0.5);
+                let path = args[3..].join("\x01");
                 let resolved = std::fs::canonicalize(&path)
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or(path);
 
-                println!("[wallbash] loading {} (anchor {}/{})", resolved, anchor_x, anchor_y);
+                println!("[wallbash] loading '{}' ({}::{}x{})", resolved, mode, anchor_x, anchor_y);
                 match set_wallpaper(
                     &resolved,
                     &vk_core,
@@ -179,6 +182,7 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     &mut wallpaper,
                     anchor_x,
                     anchor_y,
+                    &mode,
                 ) {
                     Ok(()) => println!("[wallbash] wallpaper set."),
                     Err(e) if e.to_string().contains("out of date") => {
@@ -221,6 +225,7 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                             &mut wallpaper,
                             anchor_x,
                             anchor_y,
+                            &mode,
                         ) {
                             eprintln!("[wallbash] error after swapchain recreation {}", e3);
                         }
