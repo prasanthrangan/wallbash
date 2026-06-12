@@ -25,7 +25,7 @@ const LOG_FILE: &str = "/tmp/wallbash.log";
 fn print_usage() {
     eprintln!("[Usage]");
     eprintln!("  wallbash start                  |  Start the wallpaper daemon");
-    eprintln!("  wallbash set /path/to/wall.img  |  Set the wallpaper");
+    eprintln!("  wallbash set /path/to/file.img  |  Set the wallpaper");
     eprintln!("  wallbash stop                   |  Stop the daemon");
     eprintln!("  wallbash status                 |  Show daemon status");
 }
