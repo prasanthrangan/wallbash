@@ -1,4 +1,7 @@
-# waLLbash
+###### *<div align="right"><sub>// design by t2</sub></div>*
+<p align="center"><img src="https://github.com/prasanthrangan/hyprdots/blob/3c8b0dfb5e7f8e41a67b80463513f10d57cab1a4/Source/assets/hyde.png" width="100"></p>
+
+# wa*ll*bash
 A fast and minimal wallpaper engine for HyDE
 
 Use `wallbash` as a core component of your Wayland desktop environment — set wallpapers, generate color palettes, and dynamically theme your desktop.
@@ -54,3 +57,4 @@ The project is structured in simple modules:
 - `wayland.rs` Handles the Wayland integration. It creates a Wayland surface, binds to the layer shell protocol, and sets up the layer surface for the wallpaper.
 - `vulkan.rs` Manages the Vulkan rendering pipeline. It initializes the Vulkan instance, selects a physical device (preferring a discrete GPU), creates a swapchain, and renders the wallpaper image.
 
+<p align="center"><img src="https://github.com/prasanthrangan/hyprdots/blob/3c8b0dfb5e7f8e41a67b80463513f10d57cab1a4/Source/assets/Arch.svg" width="100"></p>
