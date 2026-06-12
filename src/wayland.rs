@@ -222,6 +222,7 @@ pub fn wayland_core() -> Result<WaylandCore, Box<dyn std::error::Error>> {
     println!("[w] {} (v{})", zwlr_layer_surface_v1::ZwlrLayerSurfaceV1::interface().name, layer_surface.version());
 
     // commit and sync layer config
+    layer_surface.set_size(0, 0);
     surface.commit();
     state.layer_surface = Some(layer_surface);
     event.roundtrip(&mut state)?;

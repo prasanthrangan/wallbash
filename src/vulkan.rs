@@ -42,7 +42,6 @@ pub struct VulkanSurfchain {
 pub struct VulkanTexture {
     pub image: vk::Image,
     pub _memory: vk::DeviceMemory,
-    pub _view: vk::ImageView,
 }
 
 
@@ -197,7 +196,15 @@ pub fn vulkan_surfchain(
             f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
         })
         .copied().unwrap_or(formats[0]);
-    println!("[v] surface config: {:?}", chosen_format);
+    let extent = if caps.current_extent.width != u32::MAX {
+        caps.current_extent
+    } else {
+        vk::Extent2D {
+            width: width.clamp(caps.min_image_extent.width, caps.max_image_extent.width),
+            height: height.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
+        }
+    };
+    println!("[v] surface config: {:?} | {:?}", chosen_format, extent);
 
     // configure swapchain
     let swapchain_loader = swapchain::Device::new(instance, device);
@@ -206,7 +213,7 @@ pub fn vulkan_surfchain(
         .min_image_count(2.max(caps.min_image_count))
         .image_format(chosen_format.format)
         .image_color_space(chosen_format.color_space)
-        .image_extent(vk::Extent2D { width, height })
+        .image_extent(extent)
         .image_array_layers(1)
         .image_usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -465,33 +472,6 @@ pub fn load_texture(
 }
 
 
-// --------------------------------------------------------------------- / read texture
-
-pub fn view_texture(
-    device: &ash::Device,
-    image: vk::Image,
-    format: vk::Format,
-) -> Result<vk::ImageView, Box<dyn std::error::Error>> {
-
-    // describe the view
-    let view_info = vk::ImageViewCreateInfo::default()
-        .image(image)
-        .view_type(vk::ImageViewType::TYPE_2D)
-        .format(format)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-
-    // create the view to read texture
-    let view = unsafe { device.create_image_view(&view_info, None)? };
-    Ok(view)
-}
-
-
 // --------------------------------------------------------------------- / vulkan wrapper
 
 pub fn vulkan_pipeline(
@@ -515,9 +495,6 @@ pub fn vulkan_pipeline(
     // load pixed data from buffer to texture
     load_texture(device, graphics_queue, command_pool, command_buffer, buffer, texture, width, height)?;
 
-    // sample/read the texture
-    let view = view_texture(device, texture, vk::Format::R8G8B8A8_SRGB)?;
-
     // drop the staging buffer (no longer needed)
     unsafe {
         device.destroy_buffer(buffer, None);
@@ -527,7 +504,6 @@ pub fn vulkan_pipeline(
     Ok(VulkanTexture {
         image: texture,
         _memory: vram,
-        _view: view,
     })
 }
 
