@@ -523,6 +523,8 @@ pub fn draw_wallpaper(
     texture_height: u32,
     swapchain_extent_width: u32,
     swapchain_extent_height: u32,
+    anchor_x: f32,
+    anchor_y: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     // acquire swapchain image
@@ -594,18 +596,20 @@ pub fn draw_wallpaper(
         );
     }
 
-    // preserve aspect ratios and fill screen
+    // preserve aspect ratios and fill screen (anchored crop)
     let src_aspect = texture_width as f64 / texture_height as f64;
     let dst_aspect = swapchain_extent_width as f64 / swapchain_extent_height as f64;
     let (src_x, src_y, src_w, src_h) = if src_aspect > dst_aspect {
-        // Image is wider than screen → crop left/right
+        // Image is wider → crop left/right, horizontal anchor controls which side is kept
         let new_width = (texture_height as f64 * dst_aspect) as u32;
-        let x = (texture_width - new_width) / 2;
+        let max_x = (texture_width - new_width) as f32;
+        let x = (max_x * anchor_x) as u32;
         (x, 0, new_width, texture_height)
     } else {
-        // Image is taller than screen → crop top/bottom
+        // Image is taller → crop top/bottom, vertical anchor controls which part is kept
         let new_height = (texture_width as f64 / dst_aspect) as u32;
-        let y = (texture_height - new_height) / 2;
+        let max_y = (texture_height - new_height) as f32;
+        let y = (max_y * anchor_y) as u32;
         (0, y, texture_width, new_height)
     };
 

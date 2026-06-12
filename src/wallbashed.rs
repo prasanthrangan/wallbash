@@ -62,6 +62,8 @@ fn set_wallpaper(
     layer_width: u32,
     layer_height: u32,
     wallpaper: &mut Option<vulkan::VulkanTexture>,
+    anchor_x: f32,
+    anchor_y: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     // load the wallpaper
@@ -105,6 +107,8 @@ fn set_wallpaper(
         img.height(),
         layer_width,
         layer_height,
+        anchor_x,
+        anchor_y,
     )?;
 
     Ok(())
@@ -157,12 +161,15 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 println!("[wallbash] stopping daemon.");
                 running = false;
             } else if raw.starts_with("set ") {
-                let path = raw[4..].trim().to_string();
+                let args: Vec<&str> = raw[4..].trim().split_whitespace().collect();
+                let path = args[..args.len()-2].join(" ");
+                let anchor_x: f32 = args[args.len()-2].parse().unwrap_or(0.5);
+                let anchor_y: f32 = args[args.len()-1].parse().unwrap_or(0.5);
                 let resolved = std::fs::canonicalize(&path)
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or(path);
 
-                println!("[wallbash] loading {}", resolved);
+                println!("[wallbash] loading {} (anchor {}/{})", resolved, anchor_x, anchor_y);
                 match set_wallpaper(
                     &resolved,
                     &vk_core,
@@ -170,6 +177,8 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     wl_core.state.layer_width,
                     wl_core.state.layer_height,
                     &mut wallpaper,
+                    anchor_x,
+                    anchor_y,
                 ) {
                     Ok(()) => println!("[wallbash] wallpaper set."),
                     Err(e) if e.to_string().contains("out of date") => {
@@ -210,6 +219,8 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                             wl_core.state.layer_width,
                             wl_core.state.layer_height,
                             &mut wallpaper,
+                            anchor_x,
+                            anchor_y,
                         ) {
                             eprintln!("[wallbash] error after swapchain recreation {}", e3);
                         }

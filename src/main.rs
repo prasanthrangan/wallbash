@@ -50,6 +50,25 @@ fn send_command(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn parse_anchor(args: &[String]) -> (f32, f32) {
+    let i = args.iter().position(|a| a == "--anchor" || a == "-a");
+    let num = i
+        .and_then(|i| args.get(i + 1))
+        .and_then(|val| val.parse::<u8>().ok());
+    match num {
+        Some(1) => (0.0, 0.0),
+        Some(2) => (0.5, 0.0),
+        Some(3) => (1.0, 0.0),
+        Some(4) => (0.0, 0.5),
+        Some(5) => (0.5, 0.5),
+        Some(6) => (1.0, 0.5),
+        Some(7) => (0.0, 1.0),
+        Some(8) => (0.5, 1.0),
+        Some(9) => (1.0, 1.0),
+        _ => (0.5, 0.5),
+    }
+}
+
 
 // --------------------------------------------------------------------- / main
 
@@ -90,7 +109,8 @@ fn main() {
                     return;
                 }
             }
-            let cmd = format!("set {}", args[2]);
+            let (anchor_h, anchor_v) = parse_anchor(&args);
+            let cmd = format!("set {} {} {}", args[2], anchor_h, anchor_v);
             if let Err(e) = send_command(&cmd) {
                 eprintln!("Failed to set wallpaper {}. Is the daemon running?", e);
             }
