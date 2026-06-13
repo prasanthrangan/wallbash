@@ -1,5 +1,5 @@
 // --------------------------------------------------------------------- / tittu
-// wallbashed
+// wallbash
 // a daemon module for HyDE
 //
 
@@ -18,7 +18,7 @@ use std::{
 
 fn start_ipc(socket_path: &str) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
 
-    // Remove any stale socket file from a previous run
+    // remove any stale socket file from a previous run
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     let (tx, rx) = mpsc::channel::<String>();
@@ -94,6 +94,22 @@ fn set_wallpaper(
     }
     *wallpaper = Some(texture);
 
+    // create a blurred version for fit/original modes
+    let blurred_bg = if mode != "cover" {
+        let bg = vulkan::blur_texture(
+            vk_core,
+            wallpaper.as_ref().unwrap(),
+            img.width(),
+            img.height(),
+        )?;
+        Some(bg)
+    } else {
+        None
+    };
+
+    // prepare the background parameter for draw_wallpaper
+    let blur_bg = blurred_bg.as_ref().map(|b| (b.image, img.width(), img.height()));
+
     // draw the wallpaper
     vulkan::draw_wallpaper(
         &vk_core.instance,
@@ -110,8 +126,17 @@ fn set_wallpaper(
         layer_height,
         anchor_x,
         anchor_y,
+        blur_bg,
         mode,
     )?;
+
+    // destroy the temporary blurred texture (if any)
+    if let Some(bg) = blurred_bg {
+        unsafe {
+            vk_core.device.destroy_image(bg.image, None);
+            vk_core.device.free_memory(bg._memory, None);
+        }
+    }
 
     Ok(())
 }
@@ -250,6 +275,8 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
     vulkan::destroy_surfchain(&vk_core.entry, &vk_core.instance, &vk_core.device, &mut vk_surfchain);
     unsafe { vk_core.device.destroy_command_pool(vk_core.command_pool, None); }
+    unsafe { vk_core.device.destroy_pipeline(vk_core.blur_pipeline, None); }
+    unsafe { vk_core.device.destroy_shader_module(vk_core.blur_module, None); }
     unsafe { vk_core.device.destroy_device(None); }
     unsafe { vk_core.instance.destroy_instance(None); }
 

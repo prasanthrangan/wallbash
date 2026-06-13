@@ -30,6 +30,12 @@ fn print_usage() {
     eprintln!("  wallbash status                 |  Show daemon status");
 }
 
+fn send_command(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stream = UnixStream::connect(SOCKET_PATH)?;
+    writeln!(stream, "{}", cmd)?;
+    Ok(())
+}
+
 fn check_daemon() -> bool {
     UnixStream::connect(SOCKET_PATH).is_ok()
 }
@@ -44,38 +50,47 @@ fn wait_loop() -> Result<(), Box<dyn std::error::Error>> {
     Err("Waiting for daemon...".into())
 }
 
-fn send_command(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stream = UnixStream::connect(SOCKET_PATH)?;
-    writeln!(stream, "{}", cmd)?;
-    Ok(())
-}
+fn parse_args(args: &[String]) -> (String, String, f32, f32) {
 
-fn parse_mode(args: &[String]) -> &str {
-    let i = args.iter().position(|a| a == "--mode" || a == "-m");
-    match i.and_then(|i| args.get(i + 1)).map(|s| s.as_str()) {
-        Some("fit")      => "fit",
-        Some("original") => "original",
-        _                => "cover",
-    }
-}
+    // wallpaper – mandatory
+    let wall = args.iter().position(|a| a == "--wall" || a == "-w")
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| {
+            args.iter().skip(2).find(|a| !a.starts_with('-')).cloned()
+        })
+        .unwrap_or_else(|| {
+            eprintln!("Missing wallpaper (use --wall <path> or bare path)");
+            print_usage();
+            std::process::exit(1);
+        });
 
-fn parse_anchor(args: &[String]) -> (f32, f32) {
-    let i = args.iter().position(|a| a == "--anchor" || a == "-a");
-    let num = i
+    // mode – default "cover"
+    let mode = args.iter().position(|a| a == "--mode" || a == "-m")
         .and_then(|i| args.get(i + 1))
-        .and_then(|val| val.parse::<u8>().ok());
-    match num {
-        Some(1) => (0.0, 0.0),
-        Some(2) => (0.5, 0.0),
-        Some(3) => (1.0, 0.0),
-        Some(4) => (0.0, 0.5),
-        Some(5) => (0.5, 0.5),
-        Some(6) => (1.0, 0.5),
-        Some(7) => (0.0, 1.0),
-        Some(8) => (0.5, 1.0),
-        Some(9) => (1.0, 1.0),
+        .filter(|s| matches!(s.as_str(), "cover" | "fit" | "original"))
+        .map(|s| s.clone())
+        .unwrap_or_else(|| "cover".into());
+
+    // anchor – default "center"
+    let anchor_num = args.iter().position(|a| a == "--anchor" || a == "-a")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<u8>().ok())
+        .filter(|&n| (1..10).contains(&n))
+        .unwrap_or(5);
+    let (ax, ay) = match anchor_num {
+        1 => (0.0, 0.0),
+        2 => (0.5, 0.0),
+        3 => (1.0, 0.0),
+        4 => (0.0, 0.5),
+        5 => (0.5, 0.5),
+        6 => (1.0, 0.5),
+        7 => (0.0, 1.0),
+        8 => (0.5, 1.0),
+        9 => (1.0, 1.0),
         _ => (0.5, 0.5),
-    }
+    };
+
+    (wall, mode, ax, ay)
 }
 
 
@@ -83,13 +98,8 @@ fn parse_anchor(args: &[String]) -> (f32, f32) {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        print_usage();
-        return;
-    }
-
-    match args[1].as_str() {
-        "start" => {
+    match args.get(1).map(|s| s.as_str()) {
+        Some("start") => {
             if check_daemon() {
                 eprintln!("Daemon is already running.");
                 return;
@@ -98,11 +108,9 @@ fn main() {
                 eprintln!("Failed to start daemon {}", e);
             }
         }
-        "set" => {
-            if args.len() < 3 {
-                eprintln!("Missing image path.");
-                return;
-            }
+        Some("set") => {
+            let (wall, mode, ax, ay) = parse_args(&args);
+            let cmd = format!("set{}\x01{}\x01{}\x01{}", mode, ax, ay, wall);
             if !check_daemon() {
                 println!("Starting daemon");
                 let log_file = std::fs::File::create(LOG_FILE).expect("Cannot create log");
@@ -118,26 +126,23 @@ fn main() {
                     return;
                 }
             }
-            let mode = parse_mode(&args);
-            let (anchor_h, anchor_v) = parse_anchor(&args);
-            let cmd = format!("set{}\x01{}\x01{}\x01{}", mode, anchor_h, anchor_v, args[2]);
             if let Err(e) = send_command(&cmd) {
                 eprintln!("Failed to set wallpaper {}. Is the daemon running?", e);
             }
         }
-        "stop" => {
+        Some("stop") => {
             if let Err(e) = send_command("stop") {
                 eprintln!("Failed to stop daemon {}. Is it running?", e);
             }
         }
-        "status" => {
+        Some("status") => {
             if check_daemon() {
                 println!("Daemon is running.");
             } else {
                 println!("Daemon is not running.");
             }
         }
-        _ => print_usage(),
+        _ => print_usage()
     }
 }
 
