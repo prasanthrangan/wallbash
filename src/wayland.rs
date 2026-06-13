@@ -61,12 +61,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                 "wl_compositor" => {
                     let compositor = registry.bind::<wl_compositor::WlCompositor, _, _>(name, version, qh, ());
                     state.compositor = Some(compositor);
-                    println!("[{}] ✓ {} (v{})", name, interface, version);
+                    println!("[w{}] ✓ {} (v{})", name, interface, version);
                 }
                 "zwlr_layer_shell_v1" => {
                     let layer_shell = registry.bind::<zwlr_layer_shell_v1::ZwlrLayerShellV1, _, _>(name, version, qh, ());
                     state.layer_shell = Some(layer_shell);
-                    println!("[{}] ✓ {} (v{})", name, interface, version);
+                    println!("[w{}] ✓ {} (v{})", name, interface, version);
                 }
                 "wl_output" => {
                     let index = state.monitors.len();
@@ -79,9 +79,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                         refresh: 0,
                         detected: false,
                     });
-                    println!("[{}] ✓ {} (v{})", name, interface, version);
+                    println!("[w{}] ✓ {} (v{})", name, interface, version);
                 }
-                _ => println!("[{}] {} (v{})", name, interface, version)
+                _ => println!("[w{}] {} (v{})", name, interface, version)
             }
         }
     }
@@ -130,7 +130,7 @@ impl Dispatch<wl_output::WlOutput, usize> for AppData {
             }
             wl_output::Event::Done => {
                 if !monitor.detected {
-                    println!("[{}] monitor: {}x{}@{:.1}Hz ({})", index,
+                    println!("[w{}] monitor: {}x{}@{:.1}Hz ({})", index,
                     monitor.width,
                     monitor.height,
                     monitor.refresh as f32 / 1000.0,
@@ -167,7 +167,7 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for AppData {
             state.layer_width = width;
             state.layer_height = height;
             proxy.ack_configure(serial);
-            println!("[{}] layer surface: {}x{}", serial, width, height);
+            println!("[w] layer surface: {} >> {}x{}", serial, width, height);
         }
     }
 }

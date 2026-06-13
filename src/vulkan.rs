@@ -31,6 +31,8 @@ pub struct VulkanCore {
     pub graphics_queue: vk::Queue,
     pub command_pool: vk::CommandPool,
     pub command_buffer: vk::CommandBuffer,
+    pub blur_module: vk::ShaderModule,
+    pub blur_pipeline: vk::Pipeline,
 }
 
 pub struct VulkanSurfchain {
@@ -69,6 +71,7 @@ pub fn vulkan_core() -> Result<VulkanCore, Box<dyn std::error::Error>> {
         .application_info(&app_info)
         .enabled_extension_names(&extensions);
     let instance = unsafe { entry.create_instance(&create_info, None)? };
+    println!("[v] instance: {:?}", instance.handle());
 
     // find and pick dGPU as physical device
     let list_devices = unsafe { instance.enumerate_physical_devices()? };
@@ -99,19 +102,19 @@ pub fn vulkan_core() -> Result<VulkanCore, Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    // enable swapchain extension (device feature)
+    // enable swapchain extension
     let swapchain_ext = c"VK_KHR_swapchain";
     let device_extensions = [swapchain_ext.as_ptr()];
 
-    // create logical device
+    // create logical device and queue
     let device_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(std::slice::from_ref(&queue_info))
         .enabled_extension_names(&device_extensions);
-    let device = unsafe { instance.create_device(physical_device, &device_info, None)? };
+    let device: ash::Device = unsafe { instance.create_device(physical_device, &device_info, None)? };
     let graphics_queue = unsafe { device.get_device_queue(graphics_family_index, 0) };
-    println!("[v{}] logical device: {:?} queue {:?}", graphics_family_index, device.handle(), graphics_queue);
+    println!("[v{}] logical device {:?} >> graphics queue {:?}", graphics_family_index, device.handle(), graphics_queue);
 
-    // create persistent command pool
+    // create persistent command pool and buffer
     let command_pool_info = vk::CommandPoolCreateInfo::default()
         .queue_family_index(graphics_family_index);
     let command_pool = unsafe { device.create_command_pool(&command_pool_info, None)? };
@@ -122,6 +125,10 @@ pub fn vulkan_core() -> Result<VulkanCore, Box<dyn std::error::Error>> {
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
     let command_buffer = unsafe { device.allocate_command_buffers(&alloc_info)? }[0];
+    println!("[v] command pool {:?} >> command buffer {:?}", command_pool, command_buffer);
+
+    // call blur pipeline
+    let (blur_module, blur_pipeline) = blur_pipeline(&device)?;
 
     Ok(VulkanCore {
         entry,
@@ -132,7 +139,89 @@ pub fn vulkan_core() -> Result<VulkanCore, Box<dyn std::error::Error>> {
         graphics_queue,
         command_pool,
         command_buffer,
+        blur_module,
+        blur_pipeline,
     })
+}
+
+
+// --------------------------------------------------------------------- / blur pipeline
+
+pub fn blur_pipeline(
+    device: &ash::Device,
+) -> Result<(vk::ShaderModule, vk::Pipeline), Box<dyn std::error::Error>> {
+    // load the compiled SPIR‑V
+    let blur_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/blur.comp.spv"));
+    let blur_words = unsafe {
+        std::slice::from_raw_parts(blur_bytes.as_ptr() as *const u32, blur_bytes.len() / 4)
+    };
+
+    // descriptor set layout (b0 = sampler, b1 = storage image)
+    let bindings = [
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+    ];
+    let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+    let desc_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
+
+    // build the pipeline using the generic helper
+    let (module, pipeline) = compute_pipeline(device, &blur_words, desc_layout)?;
+
+    // the pipeline has its own copy of the layout; we can destroy this one
+    unsafe { device.destroy_descriptor_set_layout(desc_layout, None); }
+
+    println!("[v] blur pipeline created: {:?}", pipeline);
+    Ok((module, pipeline))
+}
+
+
+// --------------------------------------------------------------------- / compute pipeline
+
+fn compute_pipeline(
+    device: &ash::Device,
+    spv: &[u32],
+    desc_layout: vk::DescriptorSetLayout,
+) -> Result<(vk::ShaderModule, vk::Pipeline), Box<dyn std::error::Error>> {
+    let module = load_shader(device, spv)?;
+
+    let set_layouts = [desc_layout];
+    let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(&set_layouts);
+    let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
+
+    let stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::COMPUTE)
+        .module(module)
+        .name(c"main");
+    let pipeline_info = vk::ComputePipelineCreateInfo::default()
+        .stage(stage)
+        .layout(pipeline_layout);
+    let pipeline = unsafe {
+        device.create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+    }.unwrap()[0];
+
+    unsafe {
+        device.destroy_pipeline_layout(pipeline_layout, None);
+    }
+
+    Ok((module, pipeline))
+}
+
+
+// --------------------------------------------------------------------- / load shader
+
+fn load_shader(device: &ash::Device, spv: &[u32]) -> Result<vk::ShaderModule, Box<dyn std::error::Error>> {
+    let create_info = vk::ShaderModuleCreateInfo::default().code(spv);
+    let module = unsafe { device.create_shader_module(&create_info, None)? };
+    Ok(module)
 }
 
 
@@ -235,22 +324,43 @@ pub fn vulkan_surfchain(
 }
 
 
-// --------------------------------------------------------------------- / destroy surfchain
+// --------------------------------------------------------------------- / vulkan wrapper
 
-pub fn destroy_surfchain(
-    entry: &ash::Entry,
+pub fn vulkan_pipeline(
     instance: &ash::Instance,
     device: &ash::Device,
-    surfchain: &mut VulkanSurfchain,
-) {
-    let swapchain_loader = ash::khr::swapchain::Device::new(instance, device);
+    physical_device: vk::PhysicalDevice,
+    graphics_queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+    pixel_bytes: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<VulkanTexture, Box<dyn std::error::Error>> {
+
+    // copy raw image data to staging buffer
+    let (buffer, memory) = create_buffer(instance, device, physical_device, pixel_bytes)?;
+
+    // allocate vram for image data
+    let (texture, vram) = create_texture(
+        instance, device, physical_device, width, height,
+        vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+        vk::Format::R8G8B8A8_SRGB,
+    )?;
+
+    // load pixed data from buffer to texture
+    load_texture(device, graphics_queue, command_pool, command_buffer, buffer, texture, width, height)?;
+
+    // drop the staging buffer (no longer needed)
     unsafe {
-        swapchain_loader.destroy_swapchain(surfchain.swapchain, None);
+        device.destroy_buffer(buffer, None);
+        device.free_memory(memory, None);
     }
-    let surface_loader = surface::Instance::new(entry, instance);
-    unsafe {
-        surface_loader.destroy_surface(surfchain.surface, None);
-    }
+
+    Ok(VulkanTexture {
+        image: texture,
+        _memory: vram,
+    })
 }
 
 
@@ -315,18 +425,20 @@ pub fn create_texture(
     physical_device: vk::PhysicalDevice,
     width: u32,
     height: u32,
+    usage: vk::ImageUsageFlags,
+    format: vk::Format,
 ) -> Result<(vk::Image, vk::DeviceMemory), Box<dyn std::error::Error>> {
 
     // describe the image
     let image_info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
-        .format(vk::Format::R8G8B8A8_SRGB)
+        .format(format)
         .extent(vk::Extent3D { width, height, depth: 1 })
         .mip_levels(1)
         .array_layers(1)
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+        .usage(usage)
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED);
 
@@ -472,83 +584,209 @@ pub fn load_texture(
 }
 
 
-// --------------------------------------------------------------------- / vulkan wrapper
+// --------------------------------------------------------------------- / blur texture
 
-pub fn vulkan_pipeline(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
-    graphics_queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
-    pixel_bytes: &[u8],
+pub fn blur_texture(
+    vk_core: &VulkanCore,
+    input_texture: &VulkanTexture,
     width: u32,
     height: u32,
 ) -> Result<VulkanTexture, Box<dyn std::error::Error>> {
 
-    // copy raw image data to staging buffer
-    let (buffer, memory) = create_buffer(instance, device, physical_device, pixel_bytes)?;
+    // 1. Create the output texture (same size, with STORAGE + TRANSFER_SRC)
+    let (output_image, output_memory) = create_texture(
+        &vk_core.instance,
+        &vk_core.device,
+        vk_core.physical_device,
+        width, height,
+        vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::STORAGE,
+        vk::Format::R8G8B8A8_UNORM,
+    )?;
 
-    // allocate vram for image data
-    let (texture, vram) = create_texture(instance, device, physical_device, width, height)?;
+    // 2. Create image views and a sampler
+    let input_view = {
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(input_texture.image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_SRGB)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0, level_count: 1,
+                base_array_layer: 0, layer_count: 1,
+            });
+        unsafe { vk_core.device.create_image_view(&view_info, None)? }
+    };
+    let output_view = {
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(output_image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0, level_count: 1,
+                base_array_layer: 0, layer_count: 1,
+            });
+        unsafe { vk_core.device.create_image_view(&view_info, None)? }
+    };
+    let sampler_info = vk::SamplerCreateInfo::default()
+        .mag_filter(vk::Filter::LINEAR)
+        .min_filter(vk::Filter::LINEAR)
+        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+    let sampler = unsafe { vk_core.device.create_sampler(&sampler_info, None)? };
 
-    // load pixed data from buffer to texture
-    load_texture(device, graphics_queue, command_pool, command_buffer, buffer, texture, width, height)?;
+    // 3. Descriptor set (bindings 0=sampler, 1=storage image)
+    let bindings = [
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+    ];
+    let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+    let desc_layout = unsafe { vk_core.device.create_descriptor_set_layout(&layout_info, None)? };
 
-    // drop the staging buffer (no longer needed)
+    let pool_sizes = [
+        vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 1 },
+        vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_IMAGE, descriptor_count: 1 },
+    ];
+    let pool_info = vk::DescriptorPoolCreateInfo::default()
+        .max_sets(1)
+        .pool_sizes(&pool_sizes);
+    let desc_pool = unsafe { vk_core.device.create_descriptor_pool(&pool_info, None)? };
+
+    let set_layouts = [desc_layout];
+    let alloc_info = vk::DescriptorSetAllocateInfo::default()
+        .descriptor_pool(desc_pool)
+        .set_layouts(&set_layouts);
+    let desc_sets = unsafe { vk_core.device.allocate_descriptor_sets(&alloc_info)? };
+    let desc_set = desc_sets[0];
+
+    let input_image_info = vk::DescriptorImageInfo::default()
+        .sampler(sampler)
+        .image_view(input_view)
+        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+    let output_image_info = vk::DescriptorImageInfo::default()
+        .image_view(output_view)
+        .image_layout(vk::ImageLayout::GENERAL);
+    let input_image_infos = [input_image_info];
+    let output_image_infos = [output_image_info];
+    let write_descriptors = [
+        vk::WriteDescriptorSet::default()
+            .dst_set(desc_set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&input_image_infos),
+        vk::WriteDescriptorSet::default()
+            .dst_set(desc_set)
+            .dst_binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .image_info(&output_image_infos),
+    ];
+    unsafe { vk_core.device.update_descriptor_sets(&write_descriptors, &[]) };
+
+    // 4. Pipeline layout (no push constants, same descriptor layout as the pipeline)
+    let set_layouts2 = [desc_layout];
+    let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(&set_layouts2);
+    let pipeline_layout = unsafe { vk_core.device.create_pipeline_layout(&pipeline_layout_info, None)? };
+
+    // 5. Record compute commands
+    unsafe { vk_core.device.reset_command_pool(vk_core.command_pool, vk::CommandPoolResetFlags::empty()) }?;
+    let begin_info = vk::CommandBufferBeginInfo::default()
+        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    unsafe { vk_core.device.begin_command_buffer(vk_core.command_buffer, &begin_info) }?;
+
+    // Transition output to GENERAL
+    let barrier = vk::ImageMemoryBarrier::default()
+        .image(output_image)
+        .old_layout(vk::ImageLayout::UNDEFINED)
+        .new_layout(vk::ImageLayout::GENERAL)
+        .src_access_mask(vk::AccessFlags::empty())
+        .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0, level_count: 1,
+            base_array_layer: 0, layer_count: 1,
+        });
     unsafe {
-        device.destroy_buffer(buffer, None);
-        device.free_memory(memory, None);
+        vk_core.device.cmd_pipeline_barrier(
+            vk_core.command_buffer,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[], &[], &[barrier],
+        );
+    }
+
+    // Bind pipeline and descriptor set
+    unsafe {
+        vk_core.device.cmd_bind_pipeline(vk_core.command_buffer, vk::PipelineBindPoint::COMPUTE, vk_core.blur_pipeline);
+        vk_core.device.cmd_bind_descriptor_sets(
+            vk_core.command_buffer,
+            vk::PipelineBindPoint::COMPUTE,
+            pipeline_layout,
+            0, &[desc_set], &[],
+        );
+    }
+
+    // Dispatch
+    let group_x = (width  + 15) / 16;
+    let group_y = (height + 15) / 16;
+    unsafe { vk_core.device.cmd_dispatch(vk_core.command_buffer, group_x, group_y, 1); }
+
+    // Transition output to SHADER_READ_ONLY_OPTIMAL for later blitting
+    let barrier2 = vk::ImageMemoryBarrier::default()
+        .image(output_image)
+        .old_layout(vk::ImageLayout::GENERAL)
+        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0, level_count: 1,
+            base_array_layer: 0, layer_count: 1,
+        });
+    unsafe {
+        vk_core.device.cmd_pipeline_barrier(
+            vk_core.command_buffer,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[], &[], &[barrier2],
+        );
+    }
+    unsafe { vk_core.device.end_command_buffer(vk_core.command_buffer) }?;
+
+    // Submit
+    let command_buffers = [vk_core.command_buffer];
+    let submit_info = vk::SubmitInfo::default()
+        .command_buffers(&command_buffers);
+    let fence = unsafe { vk_core.device.create_fence(&vk::FenceCreateInfo::default(), None) }?;
+    unsafe { vk_core.device.queue_submit(vk_core.graphics_queue, &[submit_info], fence) }?;
+    unsafe { vk_core.device.wait_for_fences(&[fence], true, u64::MAX) }?;
+    unsafe { vk_core.device.destroy_fence(fence, None) };
+
+    // Cleanup transient objects
+    unsafe {
+        vk_core.device.destroy_sampler(sampler, None);
+        vk_core.device.destroy_image_view(input_view, None);
+        vk_core.device.destroy_image_view(output_view, None);
+        vk_core.device.destroy_descriptor_set_layout(desc_layout, None);
+        vk_core.device.destroy_descriptor_pool(desc_pool, None);
+        vk_core.device.destroy_pipeline_layout(pipeline_layout, None);
     }
 
     Ok(VulkanTexture {
-        image: texture,
-        _memory: vram,
+        image: output_image,
+        _memory: output_memory,
     })
-}
-
-
-// --------------------------------------------------------------------- / set mode
-
-fn mode_set(
-    img_w: u32,
-    img_h: u32,
-    scr_w: u32,
-    scr_h: u32,
-    anchor_x: f32,
-    anchor_y: f32,
-    mode: &str,
-) -> (u32, u32, u32, u32, i32, i32, u32, u32, bool) {
-
-    if mode == "fit" {
-        let scale = (scr_w as f64 / img_w as f64).min(scr_h as f64 / img_h as f64);
-        let sw = (img_w as f64 * scale) as u32;
-        let sh = (img_h as f64 * scale) as u32;
-        let dx = ((scr_w - sw) as f32 * anchor_x) as i32;
-        let dy = ((scr_h - sh) as f32 * anchor_y) as i32;
-        return (0, 0, img_w, img_h, dx, dy, sw, sh, true);
-    }
-    if mode == "original" {
-        if img_w <= scr_w && img_h <= scr_h {
-            let dx = ((scr_w - img_w) as f32 * anchor_x) as i32;
-            let dy = ((scr_h - img_h) as f32 * anchor_y) as i32;
-            return (0, 0, img_w, img_h, dx, dy, img_w, img_h, true);
-        }
-    }
-    let src_aspect = img_w as f64 / img_h as f64;
-    let dst_aspect = scr_w as f64 / scr_h as f64;
-    let (sx, sy, sw, sh) = if src_aspect > dst_aspect {
-        let new_w = (img_h as f64 * dst_aspect) as u32;
-        let max_x = (img_w - new_w) as f32;
-        let x = (max_x * anchor_x) as u32;
-        (x, 0, new_w, img_h)
-    } else {
-        let new_h = (img_w as f64 / dst_aspect) as u32;
-        let max_y = (img_h - new_h) as f32;
-        let y = (max_y * anchor_y) as u32;
-        (0, y, img_w, new_h)
-    };
-    (sx, sy, sw, sh, 0, 0, scr_w, scr_h, false)
 }
 
 
@@ -569,6 +807,7 @@ pub fn draw_wallpaper(
     swapchain_extent_height: u32,
     anchor_x: f32,
     anchor_y: f32,
+    blur_bg: Option<(vk::Image, u32, u32)>,
     mode: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
@@ -649,22 +888,99 @@ pub fn draw_wallpaper(
         mode,
     );
 
-    // if the mode requires black bars, clear the image first
+    // if the mode requires background, fill with blurred wallpaper or black
     if needs_clear {
-        let clear_color = vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] };
-        let clear_range = vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0, level_count: 1,
-            base_array_layer: 0, layer_count: 1,
-        };
-        unsafe {
-            device.cmd_clear_color_image(
-                command_buffer,
-                target_image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &clear_color,
-                &[clear_range],
-            );
+        match blur_bg {
+            Some((bg_image, bg_w, bg_h)) => {
+                // Compute a cover-crop rectangle for the blurred background
+                let bg_aspect = bg_w as f64 / bg_h as f64;
+                let scr_aspect = swapchain_extent_width as f64 / swapchain_extent_height as f64;
+                let (bg_sx, bg_sy, bg_sw, bg_sh) = if bg_aspect > scr_aspect {
+                    // background wider → crop left/right (centered)
+                    let new_w = (bg_h as f64 * scr_aspect) as u32;
+                    let x = (bg_w - new_w) / 2;
+                    (x, 0, new_w, bg_h)
+                } else {
+                    // background taller → crop top/bottom (centered)
+                    let new_h = (bg_w as f64 / scr_aspect) as u32;
+                    let y = (bg_h - new_h) / 2;
+                    (0, y, bg_w, new_h)
+                };
+
+                // Transition bg image to TRANSFER_SRC_OPTIMAL
+                let bg_barrier = vk::ImageMemoryBarrier::default()
+                    .image(bg_image)
+                    .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::SHADER_READ)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0, level_count: 1,
+                        base_array_layer: 0, layer_count: 1,
+                    });
+                unsafe {
+                    device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[], &[], &[bg_barrier],
+                    );
+                }
+
+                // Blit the cropped background to cover the entire screen
+                let bg_blit = vk::ImageBlit::default()
+                    .src_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .src_offsets([
+                        vk::Offset3D { x: bg_sx as i32, y: bg_sy as i32, z: 0 },
+                        vk::Offset3D { x: (bg_sx + bg_sw) as i32, y: (bg_sy + bg_sh) as i32, z: 1 },
+                    ])
+                    .dst_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .dst_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D { x: swapchain_extent_width as i32, y: swapchain_extent_height as i32, z: 1 },
+                    ]);
+                unsafe {
+                    device.cmd_blit_image(
+                        command_buffer,
+                        bg_image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        target_image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[bg_blit],
+                        vk::Filter::LINEAR,
+                    );
+                }
+            }
+            None => {
+                // fallback to solid black
+                let clear_color = vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] };
+                let clear_range = vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0, level_count: 1,
+                    base_array_layer: 0, layer_count: 1,
+                };
+                unsafe {
+                    device.cmd_clear_color_image(
+                        command_buffer,
+                        target_image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &clear_color,
+                        &[clear_range],
+                    );
+                }
+            }
         }
     }
 
@@ -758,6 +1074,69 @@ pub fn draw_wallpaper(
         Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {return Err("swapchain out of date (present)".into())}
         Err(vk::Result::SUBOPTIMAL_KHR) => return Ok(()),
         Err(e) => return Err(Box::new(e)),
+    }
+}
+
+
+// --------------------------------------------------------------------- / set mode
+
+fn mode_set(
+    img_w: u32,
+    img_h: u32,
+    scr_w: u32,
+    scr_h: u32,
+    anchor_x: f32,
+    anchor_y: f32,
+    mode: &str,
+) -> (u32, u32, u32, u32, i32, i32, u32, u32, bool) {
+
+    if mode == "fit" {
+        let scale = (scr_w as f64 / img_w as f64).min(scr_h as f64 / img_h as f64);
+        let sw = (img_w as f64 * scale) as u32;
+        let sh = (img_h as f64 * scale) as u32;
+        let dx = ((scr_w - sw) as f32 * anchor_x) as i32;
+        let dy = ((scr_h - sh) as f32 * anchor_y) as i32;
+        return (0, 0, img_w, img_h, dx, dy, sw, sh, true);
+    }
+    if mode == "original" {
+        if img_w <= scr_w && img_h <= scr_h {
+            let dx = ((scr_w - img_w) as f32 * anchor_x) as i32;
+            let dy = ((scr_h - img_h) as f32 * anchor_y) as i32;
+            return (0, 0, img_w, img_h, dx, dy, img_w, img_h, true);
+        }
+    }
+    let src_aspect = img_w as f64 / img_h as f64;
+    let dst_aspect = scr_w as f64 / scr_h as f64;
+    let (sx, sy, sw, sh) = if src_aspect > dst_aspect {
+        let new_w = (img_h as f64 * dst_aspect) as u32;
+        let max_x = (img_w - new_w) as f32;
+        let x = (max_x * anchor_x) as u32;
+        (x, 0, new_w, img_h)
+    } else {
+        let new_h = (img_w as f64 / dst_aspect) as u32;
+        let max_y = (img_h - new_h) as f32;
+        let y = (max_y * anchor_y) as u32;
+        (0, y, img_w, new_h)
+    };
+    (sx, sy, sw, sh, 0, 0, scr_w, scr_h, false)
+}
+
+
+// --------------------------------------------------------------------- / destroy surfchain
+
+pub fn destroy_surfchain(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    device: &ash::Device,
+    surfchain: &mut VulkanSurfchain,
+) {
+    let swapchain_loader = ash::khr::swapchain::Device::new(instance, device);
+    unsafe {
+        swapchain_loader.destroy_swapchain(surfchain.swapchain, None);
+    }
+    let surface_loader = surface::Instance::new(entry, instance);
+    unsafe {
+        surface_loader.destroy_surface(surfchain.surface, None);
     }
 }
 
