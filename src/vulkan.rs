@@ -33,6 +33,7 @@ pub struct VulkanCore {
     pub command_buffer: vk::CommandBuffer,
     pub blur_module: vk::ShaderModule,
     pub blur_pipeline: vk::Pipeline,
+    pub blur_desc_layout: vk::DescriptorSetLayout,
 }
 
 pub struct VulkanSurfchain {
@@ -44,6 +45,15 @@ pub struct VulkanSurfchain {
 pub struct VulkanTexture {
     pub image: vk::Image,
     pub _memory: vk::DeviceMemory,
+}
+
+pub enum PipelineType<'a> {
+    Compute,
+    Graphics {
+        vert_spv: &'a [u32],
+        extent: vk::Extent2D,
+        render_pass: vk::RenderPass,
+    },
 }
 
 
@@ -127,36 +137,13 @@ pub fn vulkan_core() -> Result<VulkanCore, Box<dyn std::error::Error>> {
     let command_buffer = unsafe { device.allocate_command_buffers(&alloc_info)? }[0];
     println!("[v] command pool {:?} >> command buffer {:?}", command_pool, command_buffer);
 
-    // call blur pipeline
-    let (blur_module, blur_pipeline) = blur_pipeline(&device)?;
-
-    Ok(VulkanCore {
-        entry,
-        instance,
-        physical_device,
-        graphics_family_index,
-        device,
-        graphics_queue,
-        command_pool,
-        command_buffer,
-        blur_module,
-        blur_pipeline,
-    })
-}
-
-
-// --------------------------------------------------------------------- / blur pipeline
-
-pub fn blur_pipeline(
-    device: &ash::Device,
-) -> Result<(vk::ShaderModule, vk::Pipeline), Box<dyn std::error::Error>> {
-    // load the compiled SPIR‑V
+    // build blur compute pipeline
     let blur_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/blur.comp.spv"));
     let blur_words = unsafe {
         std::slice::from_raw_parts(blur_bytes.as_ptr() as *const u32, blur_bytes.len() / 4)
     };
 
-    // descriptor set layout (b0 = sampler, b1 = storage image)
+    // descriptor layout: binding 0 = sampler, binding 1 = storage image
     let bindings = [
         vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -170,49 +157,146 @@ pub fn blur_pipeline(
             .stage_flags(vk::ShaderStageFlags::COMPUTE),
     ];
     let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-    let desc_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
+    let blur_desc_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
 
-    // build the pipeline using the generic helper
-    let (module, pipeline) = compute_pipeline(device, &blur_words, desc_layout)?;
+    let (blur_module, blur_pipeline) = build_pipeline(
+        &device,
+        PipelineType::Compute,
+        &blur_words,
+        blur_desc_layout,
+    )?;
 
-    // the pipeline has its own copy of the layout; we can destroy this one
-    unsafe { device.destroy_descriptor_set_layout(desc_layout, None); }
-
-    println!("[v] blur pipeline created: {:?}", pipeline);
-    Ok((module, pipeline))
+    Ok(VulkanCore {
+        entry,
+        instance,
+        physical_device,
+        graphics_family_index,
+        device,
+        graphics_queue,
+        command_pool,
+        command_buffer,
+        blur_module: blur_module[0],
+        blur_pipeline,
+        blur_desc_layout,
+    })
 }
 
 
-// --------------------------------------------------------------------- / compute pipeline
+// --------------------------------------------------------------------- / build pipeline
 
-fn compute_pipeline(
+fn build_pipeline(
     device: &ash::Device,
-    spv: &[u32],
+    pipeline_type: PipelineType,
+    frag_spv: &[u32],
     desc_layout: vk::DescriptorSetLayout,
-) -> Result<(vk::ShaderModule, vk::Pipeline), Box<dyn std::error::Error>> {
-    let module = load_shader(device, spv)?;
+) -> Result<(Vec<vk::ShaderModule>, vk::Pipeline), Box<dyn std::error::Error>> {
+    let mut modules = Vec::new();
+
+    let stages = match pipeline_type {
+        PipelineType::Compute => {
+            let module = load_shader(device, frag_spv)?;
+            modules.push(module);
+            let stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(module)
+                .name(c"main");
+            vec![stage]
+        }
+        PipelineType::Graphics { vert_spv, extent: _, .. } => {
+            let vert_module = load_shader(device, vert_spv)?;
+            let frag_module = load_shader(device, frag_spv)?;
+            modules.push(vert_module);
+            modules.push(frag_module);
+            let vert_stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vert_module)
+                .name(c"main");
+            let frag_stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(frag_module)
+                .name(c"main");
+            vec![vert_stage, frag_stage]
+        }
+    };
 
     let set_layouts = [desc_layout];
     let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&set_layouts);
     let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
 
-    let stage = vk::PipelineShaderStageCreateInfo::default()
-        .stage(vk::ShaderStageFlags::COMPUTE)
-        .module(module)
-        .name(c"main");
-    let pipeline_info = vk::ComputePipelineCreateInfo::default()
-        .stage(stage)
-        .layout(pipeline_layout);
-    let pipeline = unsafe {
-        device.create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-    }.unwrap()[0];
+    let pipeline = match pipeline_type {
+        PipelineType::Compute => {
+            let info = vk::ComputePipelineCreateInfo::default()
+                .stage(stages[0])      // pass by value, not reference
+                .layout(pipeline_layout);
+            let pipelines = unsafe {
+                device.create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
+            }.unwrap();
+            pipelines[0]
+        }
+        PipelineType::Graphics { extent, render_pass, .. } => {
+            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
 
-    unsafe {
-        device.destroy_pipeline_layout(pipeline_layout, None);
-    }
+            let viewport = vk::Viewport {
+                x: 0.0, y: 0.0,
+                width: extent.width as f32,
+                height: extent.height as f32,
+                min_depth: 0.0, max_depth: 1.0,
+            };
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent,
+            };
+            let viewports = [viewport];
+            let scissors = [scissor];
+            let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+                .viewports(&viewports)
+                .scissors(&scissors);
 
-    Ok((module, pipeline))
+            let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+                .polygon_mode(vk::PolygonMode::FILL)
+                .cull_mode(vk::CullModeFlags::NONE)
+                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+                .line_width(1.0);
+
+            let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+            let color_blend = vk::PipelineColorBlendAttachmentState::default()
+                .color_write_mask(vk::ColorComponentFlags::RGBA)
+                .blend_enable(false);
+            let color_blends = [color_blend];
+            let blend_state = vk::PipelineColorBlendStateCreateInfo::default()
+                .attachments(&color_blends);
+
+            let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
+                .dynamic_states(&[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]);
+
+            let info = vk::GraphicsPipelineCreateInfo::default()
+                .stages(&stages)
+                .vertex_input_state(&vertex_input)
+                .input_assembly_state(&input_assembly)
+                .viewport_state(&viewport_state)
+                .rasterization_state(&rasterizer)
+                .multisample_state(&multisample)
+                .color_blend_state(&blend_state)
+                .dynamic_state(&dynamic_state)
+                .layout(pipeline_layout)
+                .render_pass(render_pass)
+                .subpass(0);
+
+            let pipelines = unsafe {
+                device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+            }.unwrap();
+            pipelines[0]
+        }
+    };
+
+    unsafe { device.destroy_pipeline_layout(pipeline_layout, None) };
+
+    Ok((modules, pipeline))
 }
 
 
@@ -327,34 +411,46 @@ pub fn vulkan_surfchain(
 // --------------------------------------------------------------------- / vulkan wrapper
 
 pub fn vulkan_pipeline(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
-    graphics_queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
+    vk_core: &VulkanCore,
     pixel_bytes: &[u8],
     width: u32,
     height: u32,
 ) -> Result<VulkanTexture, Box<dyn std::error::Error>> {
 
     // copy raw image data to staging buffer
-    let (buffer, memory) = create_buffer(instance, device, physical_device, pixel_bytes)?;
+    let (buffer, memory) = create_buffer(
+        &vk_core.instance,
+        &vk_core.device,
+        vk_core.physical_device,
+        pixel_bytes,
+    )?;
 
     // allocate vram for image data
     let (texture, vram) = create_texture(
-        instance, device, physical_device, width, height,
+        &vk_core.instance,
+        &vk_core.device,
+        vk_core.physical_device,
+        width, height,
         vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
         vk::Format::R8G8B8A8_SRGB,
     )?;
 
-    // load pixed data from buffer to texture
-    load_texture(device, graphics_queue, command_pool, command_buffer, buffer, texture, width, height)?;
+    // load pixel data from buffer to texture
+    load_texture(
+        &vk_core.device,
+        vk_core.graphics_queue,
+        vk_core.command_pool,
+        vk_core.command_buffer,
+        buffer,
+        texture,
+        width,
+        height,
+    )?;
 
     // drop the staging buffer (no longer needed)
     unsafe {
-        device.destroy_buffer(buffer, None);
-        device.free_memory(memory, None);
+        vk_core.device.destroy_buffer(buffer, None);
+        vk_core.device.free_memory(memory, None);
     }
 
     Ok(VulkanTexture {
@@ -593,7 +689,7 @@ pub fn blur_texture(
     height: u32,
 ) -> Result<VulkanTexture, Box<dyn std::error::Error>> {
 
-    // 1. Create the output texture (same size, with STORAGE + TRANSFER_SRC)
+    // create the output texture (same size, with STORAGE + TRANSFER_SRC)
     let (output_image, output_memory) = create_texture(
         &vk_core.instance,
         &vk_core.device,
@@ -603,7 +699,7 @@ pub fn blur_texture(
         vk::Format::R8G8B8A8_UNORM,
     )?;
 
-    // 2. Create image views and a sampler
+    // create image views and a sampler
     let input_view = {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(input_texture.image)
@@ -636,22 +732,7 @@ pub fn blur_texture(
         .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
     let sampler = unsafe { vk_core.device.create_sampler(&sampler_info, None)? };
 
-    // 3. Descriptor set (bindings 0=sampler, 1=storage image)
-    let bindings = [
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE),
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(1)
-            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE),
-    ];
-    let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-    let desc_layout = unsafe { vk_core.device.create_descriptor_set_layout(&layout_info, None)? };
-
+    // descriptor set (bindings 0=sampler, 1=storage image)
     let pool_sizes = [
         vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 1 },
         vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_IMAGE, descriptor_count: 1 },
@@ -661,7 +742,7 @@ pub fn blur_texture(
         .pool_sizes(&pool_sizes);
     let desc_pool = unsafe { vk_core.device.create_descriptor_pool(&pool_info, None)? };
 
-    let set_layouts = [desc_layout];
+    let set_layouts = [vk_core.blur_desc_layout];
     let alloc_info = vk::DescriptorSetAllocateInfo::default()
         .descriptor_pool(desc_pool)
         .set_layouts(&set_layouts);
@@ -691,19 +772,19 @@ pub fn blur_texture(
     ];
     unsafe { vk_core.device.update_descriptor_sets(&write_descriptors, &[]) };
 
-    // 4. Pipeline layout (no push constants, same descriptor layout as the pipeline)
-    let set_layouts2 = [desc_layout];
+    // pipeline layout (no push constants, same descriptor layout as the pipeline)
+    let set_layouts2 = [vk_core.blur_desc_layout];
     let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&set_layouts2);
     let pipeline_layout = unsafe { vk_core.device.create_pipeline_layout(&pipeline_layout_info, None)? };
 
-    // 5. Record compute commands
+    // record compute commands
     unsafe { vk_core.device.reset_command_pool(vk_core.command_pool, vk::CommandPoolResetFlags::empty()) }?;
     let begin_info = vk::CommandBufferBeginInfo::default()
         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe { vk_core.device.begin_command_buffer(vk_core.command_buffer, &begin_info) }?;
 
-    // Transition output to GENERAL
+    // transition output to GENERAL
     let barrier = vk::ImageMemoryBarrier::default()
         .image(output_image)
         .old_layout(vk::ImageLayout::UNDEFINED)
@@ -725,7 +806,7 @@ pub fn blur_texture(
         );
     }
 
-    // Bind pipeline and descriptor set
+    // bind pipeline and descriptor set
     unsafe {
         vk_core.device.cmd_bind_pipeline(vk_core.command_buffer, vk::PipelineBindPoint::COMPUTE, vk_core.blur_pipeline);
         vk_core.device.cmd_bind_descriptor_sets(
@@ -736,12 +817,12 @@ pub fn blur_texture(
         );
     }
 
-    // Dispatch
+    // dispatch
     let group_x = (width  + 15) / 16;
     let group_y = (height + 15) / 16;
     unsafe { vk_core.device.cmd_dispatch(vk_core.command_buffer, group_x, group_y, 1); }
 
-    // Transition output to SHADER_READ_ONLY_OPTIMAL for later blitting
+    // transition output to SHADER_READ_ONLY_OPTIMAL for later blitting
     let barrier2 = vk::ImageMemoryBarrier::default()
         .image(output_image)
         .old_layout(vk::ImageLayout::GENERAL)
@@ -764,21 +845,19 @@ pub fn blur_texture(
     }
     unsafe { vk_core.device.end_command_buffer(vk_core.command_buffer) }?;
 
-    // Submit
+    // submit
     let command_buffers = [vk_core.command_buffer];
-    let submit_info = vk::SubmitInfo::default()
-        .command_buffers(&command_buffers);
+    let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
     let fence = unsafe { vk_core.device.create_fence(&vk::FenceCreateInfo::default(), None) }?;
     unsafe { vk_core.device.queue_submit(vk_core.graphics_queue, &[submit_info], fence) }?;
     unsafe { vk_core.device.wait_for_fences(&[fence], true, u64::MAX) }?;
     unsafe { vk_core.device.destroy_fence(fence, None) };
 
-    // Cleanup transient objects
+    // cleanup transient objects
     unsafe {
         vk_core.device.destroy_sampler(sampler, None);
         vk_core.device.destroy_image_view(input_view, None);
         vk_core.device.destroy_image_view(output_view, None);
-        vk_core.device.destroy_descriptor_set_layout(desc_layout, None);
         vk_core.device.destroy_descriptor_pool(desc_pool, None);
         vk_core.device.destroy_pipeline_layout(pipeline_layout, None);
     }

@@ -35,20 +35,11 @@ wallbash set /path/to/file.img  #  Set wallpaper (auto start daemon)
 wallbash stop                   #  Stop the daemon
 wallbash status                 #  Show daemon status
 
-        ┌─────────────────────────────────────────┐
-        │ ┌─────────────────────────────────────┐ │
-        │ │  (1)            (2)            (3)  │ │
-        │ │                                     │ │
-        │ │  (4)            (5)            (6)  │ │
-        │ │                                     │ │
-        │ │  (7)            (8)            (9)  │ │
-        │ └─────────────────────────────────────┘ │
-        └─────────────────────────────────────────┘
-
+# options for "set"
 wallbash set [option] <value>
     -m, --mode <mode>           # Scaling mode (cover, fit, original)
     -a, --anchor <1-9>          # Anchor point (1=top-left ... 9=bottom-right)
-    -w, --wall <path>           # Wallpaper file /path/to/file.img
+    -w, --wall <file>           # Wallpaper file /path/to/file.img
 ```
 
 The Rust binary compiles to a single executable, `wallbash`. It acts as both a client and a daemon:
