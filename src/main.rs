@@ -6,7 +6,7 @@
 
 // --------------------------------------------------------------------- / imports
 
-pub mod wallbashed;
+pub mod wallbash;
 pub mod wayland;
 pub mod vulkan;
 use std::{
@@ -23,11 +23,26 @@ const LOG_FILE: &str = "/tmp/wallbash.log";
 // --------------------------------------------------------------------- / funtions
 
 fn print_usage() {
-    eprintln!("[Usage]");
-    eprintln!("  wallbash start                  |  Start the wallpaper daemon");
-    eprintln!("  wallbash set /path/to/file.img  |  Set the wallpaper");
-    eprintln!("  wallbash stop                   |  Stop the daemon");
-    eprintln!("  wallbash status                 |  Show daemon status");
+    eprintln!(r"[Usage]
+    wallbash start                  |  Start the wallpaper daemon
+    wallbash set /path/to/file.img  |  Set wallpaper (auto start daemon)
+    wallbash stop                   |  Stop the daemon
+    wallbash status                 |  Show daemon status
+
+            ┌─────────────────────────────────────────┐
+            │ ┌─────────────────────────────────────┐ │
+            │ │  (1)            (2)            (3)  │ │
+            │ │                                     │ │
+            │ │  (4)            (5)            (6)  │ │
+            │ │                                     │ │
+            │ │  (7)            (8)            (9)  │ │
+            │ └─────────────────────────────────────┘ │
+            └─────────────────────────────────────────┘
+
+    wallbash set [option] <value>
+        -m, --mode <mode>           | Scaling mode (cover, fit, original)
+        -a, --anchor <1-9>          | Anchor point (1=top-left ... 9=bottom-right)
+        -w, --wall <path>           | Wallpaper file /path/to/file.img");
 }
 
 fn send_command(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -104,7 +119,7 @@ fn main() {
                 eprintln!("Daemon is already running.");
                 return;
             }
-            if let Err(e) = wallbashed::run(SOCKET_PATH) {
+            if let Err(e) = wallbash::run(SOCKET_PATH) {
                 eprintln!("Failed to start daemon {}", e);
             }
         }
