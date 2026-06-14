@@ -11,8 +11,10 @@ Use `wallbash` as a core component of your Wayland desktop environment — set w
 
 - Vulkan-powered GPU acceleration for smooth performance
 - Color palette generation for dynamic theming (WIP)
-- Support for smooth transitions and animations (WIP)
+- Fluid transitions and animations (WIP)
 - Multi-monitor support (WIP)
+- Scale and anchor the image to your liking
+- Dynamic blur fill for mismatched aspect ratios to eliminate black bars
 
 
 ## Build
@@ -28,10 +30,25 @@ sudo cp target/release/wallbash /usr/local/bin/
 ## Usage
 
 ```bash
-wallbash start                   # Start the daemon
-wallbash set /path/to/file.img   # Set wallpaper (auto start daemon)
-wallbash stop                    # Stop the daemon
-wallbash status                  # Show daemon status
+wallbash start                  #  Start the wallpaper daemon
+wallbash set /path/to/file.img  #  Set wallpaper (auto start daemon)
+wallbash stop                   #  Stop the daemon
+wallbash status                 #  Show daemon status
+
+        ┌─────────────────────────────────────────┐
+        │ ┌─────────────────────────────────────┐ │
+        │ │  (1)            (2)            (3)  │ │
+        │ │                                     │ │
+        │ │  (4)            (5)            (6)  │ │
+        │ │                                     │ │
+        │ │  (7)            (8)            (9)  │ │
+        │ └─────────────────────────────────────┘ │
+        └─────────────────────────────────────────┘
+
+wallbash set [option] <value>
+    -m, --mode <mode>           # Scaling mode (cover, fit, original)
+    -a, --anchor <1-9>          # Anchor point (1=top-left ... 9=bottom-right)
+    -w, --wall <path>           # Wallpaper file /path/to/file.img
 ```
 
 The Rust binary compiles to a single executable, `wallbash`. It acts as both a client and a daemon:
@@ -46,15 +63,16 @@ The Rust binary compiles to a single executable, `wallbash`. It acts as both a c
 ```
 src/
 ├── main.rs
-├── wallbashed.rs
+├── wallbash.rs
 ├── wayland.rs
 └── vulkan.rs
 ```
 
-The project is structured in simple modules:
+The core project is structured in simple modules:
 - `main.rs` Entry point of the binary. Works as a CLI tool to parse arguments and handle the daemon.
-- `wallbashed.rs` The core daemon module. It manages the IPC listener, handles incoming commands, and orchestrates the wallpaper loading and rendering process.
+- `wallbash.rs` The core daemon module. It manages the IPC listener, handles incoming commands, and orchestrates the wallpaper loading and rendering process.
 - `wayland.rs` Handles the Wayland integration. It creates a Wayland surface, binds to the layer shell protocol, and sets up the layer surface for the wallpaper.
 - `vulkan.rs` Manages the Vulkan rendering pipeline. It initializes the Vulkan instance, selects a physical device (preferring a discrete GPU), creates a swapchain, and renders the wallpaper image.
 
+###### *<div align="right"><sub>// HyDE</sub></div>*
 <p align="center"><img src="https://github.com/prasanthrangan/hyprdots/blob/3c8b0dfb5e7f8e41a67b80463513f10d57cab1a4/Source/assets/Arch.svg" width="100"></p>
