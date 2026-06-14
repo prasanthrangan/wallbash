@@ -23,26 +23,17 @@ const LOG_FILE: &str = "/tmp/wallbash.log";
 // --------------------------------------------------------------------- / funtions
 
 fn print_usage() {
-    eprintln!(r"[Usage]
+    eprintln!(r"::Usage
     wallbash start                  |  Start the wallpaper daemon
     wallbash set /path/to/file.img  |  Set wallpaper (auto start daemon)
     wallbash stop                   |  Stop the daemon
     wallbash status                 |  Show daemon status
 
-            ┌─────────────────────────────────────────┐
-            │ ┌─────────────────────────────────────┐ │
-            │ │  (1)            (2)            (3)  │ │
-            │ │                                     │ │
-            │ │  (4)            (5)            (6)  │ │
-            │ │                                     │ │
-            │ │  (7)            (8)            (9)  │ │
-            │ └─────────────────────────────────────┘ │
-            └─────────────────────────────────────────┘
-
+::Options
     wallbash set [option] <value>
         -m, --mode <mode>           | Scaling mode (cover, fit, original)
         -a, --anchor <1-9>          | Anchor point (1=top-left ... 9=bottom-right)
-        -w, --wall <path>           | Wallpaper file /path/to/file.img");
+        -w, --wall <file>           | Wallpaper file /path/to/file.img");
 }
 
 fn send_command(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {

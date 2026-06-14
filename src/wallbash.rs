@@ -74,12 +74,7 @@ fn set_wallpaper(
 
     // call the vulkan pipeline
     let texture = vulkan::vulkan_pipeline(
-        &vk_core.instance,
-        &vk_core.device,
-        vk_core.physical_device,
-        vk_core.graphics_queue,
-        vk_core.command_pool,
-        vk_core.command_buffer,
+        vk_core,
         &pixel_bytes,
         img.width(),
         img.height(),
@@ -197,7 +192,7 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or(path);
 
-                println!("[wallbash] loading '{}' ({}::{}x{})", resolved, mode, anchor_x, anchor_y);
+                println!("[wallbash] loading '{}' ({}-{}x{})", resolved, mode, anchor_x, anchor_y);
                 match set_wallpaper(
                     &resolved,
                     &vk_core,
@@ -276,6 +271,7 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     vulkan::destroy_surfchain(&vk_core.entry, &vk_core.instance, &vk_core.device, &mut vk_surfchain);
     unsafe { vk_core.device.destroy_command_pool(vk_core.command_pool, None); }
     unsafe { vk_core.device.destroy_pipeline(vk_core.blur_pipeline, None); }
+    unsafe { vk_core.device.destroy_descriptor_set_layout(vk_core.blur_desc_layout, None); }
     unsafe { vk_core.device.destroy_shader_module(vk_core.blur_module, None); }
     unsafe { vk_core.device.destroy_device(None); }
     unsafe { vk_core.instance.destroy_instance(None); }
