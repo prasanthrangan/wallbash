@@ -6,7 +6,7 @@
 
 // --------------------------------------------------------------------- / imports
 
-use crate::{vulkan, wayland};
+use crate::{vulkan, wayland, filters};
 use std::{
     os::unix::net::{UnixListener, UnixStream},
     io::{BufRead, BufReader},
@@ -65,6 +65,7 @@ fn set_wallpaper(
     anchor_x: f32,
     anchor_y: f32,
     mode: &str,
+    effect: impl FnOnce(&vulkan::VulkanTexture) -> Option<vulkan::VulkanTexture>,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     // load the wallpaper
@@ -90,20 +91,8 @@ fn set_wallpaper(
     *wallpaper = Some(texture);
 
     // create a blurred version for fit/original modes
-    let blurred_bg = if mode != "cover" {
-        let bg = vulkan::blur_texture(
-            vk_core,
-            wallpaper.as_ref().unwrap(),
-            img.width(),
-            img.height(),
-        )?;
-        Some(bg)
-    } else {
-        None
-    };
-
-    // prepare the background parameter for draw_wallpaper
-    let blur_bg = blurred_bg.as_ref().map(|b| (b.image, img.width(), img.height()));
+    let background_texture = effect(wallpaper.as_ref().unwrap());
+    let background = background_texture.as_ref().map(|b| (b.image, b.width, b.height));
 
     // draw the wallpaper
     vulkan::draw_wallpaper(
@@ -121,12 +110,12 @@ fn set_wallpaper(
         layer_height,
         anchor_x,
         anchor_y,
-        blur_bg,
+        background,
         mode,
     )?;
 
     // destroy the temporary blurred texture (if any)
-    if let Some(bg) = blurred_bg {
+    if let Some(bg) = background_texture {
         unsafe {
             vk_core.device.destroy_image(bg.image, None);
             vk_core.device.free_memory(bg._memory, None);
@@ -134,6 +123,33 @@ fn set_wallpaper(
     }
 
     Ok(())
+}
+
+
+// --------------------------------------------------------------------- / surfchain
+
+fn set_surfchain(
+    vk_core: &vulkan::VulkanCore,
+    wl_core: &wayland::WaylandCore,
+    old: Option<&mut vulkan::VulkanSurfchain>,
+) -> Result<vulkan::VulkanSurfchain, Box<dyn std::error::Error>> {
+
+    // destroy only the swapchain (level 1) – no filter resources
+    if let Some(old_sc) = old {
+        vulkan::destroy_wallbash(vk_core, Some(old_sc), None, None, None, 1);
+    }
+
+    vulkan::vulkan_surfchain(
+        &vk_core.entry,
+        &vk_core.instance,
+        vk_core.physical_device,
+        vk_core.graphics_family_index,
+        &vk_core.device,
+        &wl_core.display,
+        &wl_core.surface,
+        wl_core.state.layer_width,
+        wl_core.state.layer_height,
+    )
 }
 
 
@@ -153,17 +169,8 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     // init vulkan
     let vk_core = vulkan::vulkan_core()?;
-    let mut vk_surfchain = vulkan::vulkan_surfchain(
-        &vk_core.entry,
-        &vk_core.instance,
-        vk_core.physical_device,
-        vk_core.graphics_family_index,
-        &vk_core.device,
-        &wl_core.display,
-        &wl_core.surface,
-        wl_core.state.layer_width,
-        wl_core.state.layer_height,
-    )?;
+    let (blur_module, blur_pipeline, blur_desc_layout) = filters::filter_pipeline(&vk_core.device, "blur")?;
+    let mut vk_surfchain = set_surfchain(&vk_core, &wl_core, None)?;
 
     // blank surface until a command arrives
     let mut wallpaper: Option<vulkan::VulkanTexture> = None;
@@ -191,8 +198,25 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 let resolved = std::fs::canonicalize(&path)
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or(path);
+                println!("[wallbash] loading '{}' ({} | ax:{:?} | ay:{:?})", resolved, mode, anchor_x, anchor_y);
 
-                println!("[wallbash] loading '{}' ({}-{}x{})", resolved, mode, anchor_x, anchor_y);
+                // apply blur for non cover mode
+                let effect = |tex: &vulkan::VulkanTexture| {
+                    if mode != "cover" {
+                        filters::blur_texture(
+                            &vk_core,
+                            tex,
+                            tex.width,
+                            tex.height,
+                            blur_pipeline,
+                            blur_desc_layout,
+                        )
+                        .ok()
+                    } else {
+                        None
+                    }
+                };
+
                 match set_wallpaper(
                     &resolved,
                     &vk_core,
@@ -203,31 +227,14 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     anchor_x,
                     anchor_y,
                     &mode,
+                    effect,
                 ) {
                     Ok(()) => println!("[wallbash] wallpaper set."),
                     Err(e) if e.to_string().contains("out of date") => {
                         println!("[wallbash] swapchain out of date, recreating...");
 
                         // destroy old swapchain and surface
-                        vulkan::destroy_surfchain(
-                            &vk_core.entry,
-                            &vk_core.instance,
-                            &vk_core.device,
-                            &mut vk_surfchain,
-                        );
-
-                        // create a new one with the current layer dimensions
-                        vk_surfchain = match vulkan::vulkan_surfchain(
-                            &vk_core.entry,
-                            &vk_core.instance,
-                            vk_core.physical_device,
-                            vk_core.graphics_family_index,
-                            &vk_core.device,
-                            &wl_core.display,
-                            &wl_core.surface,
-                            wl_core.state.layer_width,
-                            wl_core.state.layer_height,
-                        ) {
+                        vk_surfchain = match set_surfchain(&vk_core, &wl_core, Some(&mut vk_surfchain)) {
                             Ok(sc) => sc,
                             Err(e2) => {
                                 eprintln!("[wallbash] failed to recreate swapchain {}", e2);
@@ -246,6 +253,7 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                             anchor_x,
                             anchor_y,
                             &mode,
+                            effect,
                         ) {
                             eprintln!("[wallbash] error after swapchain recreation {}", e3);
                         }
@@ -256,7 +264,6 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("[wallbash] unknown {}", raw);
             }
         }
-
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
 
@@ -268,13 +275,14 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             vk_core.device.free_memory(tex._memory, None);
         }
     }
-    vulkan::destroy_surfchain(&vk_core.entry, &vk_core.instance, &vk_core.device, &mut vk_surfchain);
-    unsafe { vk_core.device.destroy_command_pool(vk_core.command_pool, None); }
-    unsafe { vk_core.device.destroy_pipeline(vk_core.blur_pipeline, None); }
-    unsafe { vk_core.device.destroy_descriptor_set_layout(vk_core.blur_desc_layout, None); }
-    unsafe { vk_core.device.destroy_shader_module(vk_core.blur_module, None); }
-    unsafe { vk_core.device.destroy_device(None); }
-    unsafe { vk_core.instance.destroy_instance(None); }
+    vulkan::destroy_wallbash(
+        &vk_core,
+        Some(&mut vk_surfchain),
+        Some(blur_module),
+        Some(blur_pipeline),
+        Some(blur_desc_layout),
+        2,
+    );
 
     println!("[wallbash] daemon stopped.");
     Ok(())
