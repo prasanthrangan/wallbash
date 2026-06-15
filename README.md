@@ -56,7 +56,8 @@ src/
 ├── main.rs
 ├── wallbash.rs
 ├── wayland.rs
-└── vulkan.rs
+├── vulkan.rs
+└── filters.rs
 ```
 
 The core project is structured in simple modules:
@@ -64,6 +65,7 @@ The core project is structured in simple modules:
 - `wallbash.rs` The core daemon module. It manages the IPC listener, handles incoming commands, and orchestrates the wallpaper loading and rendering process.
 - `wayland.rs` Handles the Wayland integration. It creates a Wayland surface, binds to the layer shell protocol, and sets up the layer surface for the wallpaper.
 - `vulkan.rs` Manages the Vulkan rendering pipeline. It initializes the Vulkan instance, selects a physical device (preferring a discrete GPU), creates a swapchain, and renders the wallpaper image.
+- `filters.rs` – Implements image filters and post‑processing effects, including dynamic background blur, scaling algorithms, and other visual transformations.
 
 ###### *<div align="right"><sub>// HyDE</sub></div>*
 <p align="center"><img src="https://github.com/prasanthrangan/hyprdots/blob/3c8b0dfb5e7f8e41a67b80463513f10d57cab1a4/Source/assets/Arch.svg" width="100"></p>

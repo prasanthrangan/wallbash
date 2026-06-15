@@ -9,6 +9,7 @@
 pub mod wallbash;
 pub mod wayland;
 pub mod vulkan;
+pub mod filters;
 use std::{
     env, io::Write,
     os::unix::net::UnixStream,
