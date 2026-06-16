@@ -239,564 +239,522 @@ pub fn vulkan_surfchain(
 }
 
 
-// --------------------------------------------------------------------- / vulkan wrapper
+// --------------------------------------------------------------------- / record commands
 
-pub fn vulkan_pipeline(
-    vk_core: &VulkanCore,
-    pixel_bytes: &[u8],
-    width: u32,
-    height: u32,
-) -> Result<VulkanTexture, Box<dyn std::error::Error>> {
+impl VulkanCore {
+    pub(crate) fn record_commands(
+        &self,
+        f: impl FnOnce(vk::CommandBuffer),
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        unsafe {
+            self.device
+                .reset_command_pool(self.command_pool, vk::CommandPoolResetFlags::empty())?;
+        }
 
-    // copy raw image data to staging buffer
-    let (buffer, memory) = create_buffer(
-        &vk_core.instance,
-        &vk_core.device,
-        vk_core.physical_device,
-        pixel_bytes,
-    )?;
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe {
+            self.device
+                .begin_command_buffer(self.command_buffer, &begin_info)?;
+        }
 
-    // allocate vram for image data
-    let (texture, vram) = create_texture(
-        &vk_core.instance,
-        &vk_core.device,
-        vk_core.physical_device,
-        width, height,
-        vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-        vk::Format::R8G8B8A8_SRGB,
-    )?;
+        f(self.command_buffer);
+        unsafe {
+            self.device.end_command_buffer(self.command_buffer)?;
+        }
 
-    // load pixel data from buffer to texture
-    load_texture(
-        &vk_core.device,
-        vk_core.graphics_queue,
-        vk_core.command_pool,
-        vk_core.command_buffer,
-        buffer,
-        texture,
-        width,
-        height,
-    )?;
+        let submit_info = vk::SubmitInfo::default()
+            .command_buffers(std::slice::from_ref(&self.command_buffer));
+        let fence = unsafe {
+            self.device
+                .create_fence(&vk::FenceCreateInfo::default(), None)?
+        };
+        unsafe {
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], fence)?;
+            self.device
+                .wait_for_fences(&[fence], true, u64::MAX)?;
+            self.device.destroy_fence(fence, None);
+        }
 
-    // drop the staging buffer (no longer needed)
-    unsafe {
-        vk_core.device.destroy_buffer(buffer, None);
-        vk_core.device.free_memory(memory, None);
+        Ok(())
     }
-
-    Ok(VulkanTexture {
-        image: texture,
-        _memory: vram,
-        width,
-        height,
-    })
 }
 
 
-// --------------------------------------------------------------------- / staging buffer
+// --------------------------------------------------------------------- / memory type
 
-pub fn create_buffer(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
-    data: &[u8],
-) -> Result<(vk::Buffer, vk::DeviceMemory), Box<dyn std::error::Error>> {
-
-    // configure and create buffer
-    let size = data.len() as u64;
-    let buffer_info = vk::BufferCreateInfo::default()
-        .size(size)
-        .usage(vk::BufferUsageFlags::TRANSFER_SRC) // use as source for copy operations
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
-    let buffer = unsafe { device.create_buffer(&buffer_info, None)? };
-
-    // configure memory type
-    let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-    let mem_properties = unsafe { instance.get_physical_device_memory_properties(physical_device) };
-
-    let memory_type_index = mem_properties.memory_types[..]
-        .iter()
-        .enumerate()
-        .find(|(i, mt)| {
-            mem_requirements.memory_type_bits & (1 << i) != 0
-                && mt.property_flags.contains(
-                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                )
-        })
-        .map(|(i, _)| i as u32)
-        .expect("No suitable memory type found for staging buffer");
-
-    // allocate memory
-    let alloc_info = vk::MemoryAllocateInfo::default()
-        .allocation_size(mem_requirements.size)
-        .memory_type_index(memory_type_index);
-    let memory = unsafe { device.allocate_memory(&alloc_info, None)? };
-
-    // attach memory to buffer
-    unsafe { device.bind_buffer_memory(buffer, memory, 0) }?;
-
-    // map memory and copy data
-    let ptr = unsafe {
-        device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty())?
-    } as *mut u8;
-    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len()); }
-    unsafe { device.unmap_memory(memory) };
-
-    Ok((buffer, memory))
+impl VulkanCore {
+    fn memory_type(
+        &self,
+        type_bits: u32,
+        required_flags: vk::MemoryPropertyFlags,
+    ) -> u32 {
+        let props = unsafe {
+            self.instance
+                .get_physical_device_memory_properties(self.physical_device)
+        };
+        props.memory_types[..]
+            .iter()
+            .enumerate()
+            .find(|(i, mt)| {
+                (type_bits & (1 << i)) != 0
+                    && mt.property_flags.contains(required_flags)
+            })
+            .map(|(i, _)| i as u32)
+            .expect("No suitable memory type found")
+    }
 }
 
 
-// --------------------------------------------------------------------- / allocate vram
+// --------------------------------------------------------------------- / image barrier
 
-pub fn create_texture(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
-    width: u32,
-    height: u32,
-    usage: vk::ImageUsageFlags,
-    format: vk::Format,
-) -> Result<(vk::Image, vk::DeviceMemory), Box<dyn std::error::Error>> {
-
-    // describe the image
-    let image_info = vk::ImageCreateInfo::default()
-        .image_type(vk::ImageType::TYPE_2D)
-        .format(format)
-        .extent(vk::Extent3D { width, height, depth: 1 })
-        .mip_levels(1)
-        .array_layers(1)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(usage)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .initial_layout(vk::ImageLayout::UNDEFINED);
-
-    // create image handle
-    let image = unsafe { device.create_image(&image_info, None)? };
-
-    // how much memory does the image need?
-    let mem_requirements = unsafe { device.get_image_memory_requirements(image) };
-    let mem_properties = unsafe { instance.get_physical_device_memory_properties(physical_device) };
-
-    // choose the memory type
-    let memory_type_index = mem_properties.memory_types[..]
-        .iter()
-        .enumerate()
-        .find(|(i, mt)| {
-            mem_requirements.memory_type_bits & (1 << i) != 0
-                && mt.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
-        })
-        .map(|(i, _)| i as u32)
-        .expect("No suitable memory type for texture image");
-
-    // allocate vram for the image
-    let alloc_info = vk::MemoryAllocateInfo::default()
-        .allocation_size(mem_requirements.size)
-        .memory_type_index(memory_type_index);
-    let memory = unsafe { device.allocate_memory(&alloc_info, None)? };
-
-    // attach the vram to the image
-    unsafe { device.bind_image_memory(image, memory, 0) }?;
-
-    Ok((image, memory))
+impl VulkanCore {
+    fn image_barrier(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        image: vk::Image,
+        old_layout: vk::ImageLayout,
+        new_layout: vk::ImageLayout,
+        src_access: vk::AccessFlags,
+        dst_access: vk::AccessFlags,
+        src_stage: vk::PipelineStageFlags,
+        dst_stage: vk::PipelineStageFlags,
+    ) {
+        let barrier = vk::ImageMemoryBarrier::default()
+            .image(image)
+            .old_layout(old_layout)
+            .new_layout(new_layout)
+            .src_access_mask(src_access)
+            .dst_access_mask(dst_access)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0, level_count: 1,
+                base_array_layer: 0, layer_count: 1,
+            });
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                command_buffer,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[], &[],
+                &[barrier],
+            );
+        }
+    }
 }
 
 
-// --------------------------------------------------------------------- / write texture
+// --------------------------------------------------------------------- / fill background
 
-pub fn load_texture(
-    device: &ash::Device,
-    graphics_queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
-    buffer: vk::Buffer,
-    image: vk::Image,
-    width: u32,
-    height: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
+impl VulkanCore {
+    fn fill_background(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        target_image: vk::Image,
+        background: (vk::Image, u32, u32),
+        layer_width: u32,
+        layer_height: u32,
+    ) {
+        let (bg_image, bg_w, bg_h) = background;
 
-    // reuse the persistent command buffer
-    unsafe { device.reset_command_pool(command_pool, vk::CommandPoolResetFlags::empty()) }?;
+        let bg_aspect = bg_w as f64 / bg_h as f64;
+        let scr_aspect = layer_width as f64 / layer_height as f64;
+        let (bg_sx, bg_sy, bg_sw, bg_sh) = if bg_aspect > scr_aspect {
+            let new_w = (bg_h as f64 * scr_aspect) as u32;
+            let x = (bg_w - new_w) / 2;
+            (x, 0, new_w, bg_h)
+        } else {
+            let new_h = (bg_w as f64 / scr_aspect) as u32;
+            let y = (bg_h - new_h) / 2;
+            (0, y, bg_w, new_h)
+        };
 
-    // begin recording commands
-    let begin_info = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-    unsafe { device.begin_command_buffer(command_buffer, &begin_info) }?;
-
-    // make the texture writable
-    let barrier1 = vk::ImageMemoryBarrier::default()
-        .image(image)
-        .old_layout(vk::ImageLayout::UNDEFINED)
-        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-        .src_access_mask(vk::AccessFlags::empty())
-        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-    unsafe {
-        device.cmd_pipeline_barrier(
+        self.image_barrier(
             command_buffer,
+            bg_image,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            vk::AccessFlags::SHADER_READ,
+            vk::AccessFlags::TRANSFER_READ,
             vk::PipelineStageFlags::TOP_OF_PIPE,
             vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[barrier1],
         );
-    }
 
-    // copy the buffer into the image
-    let region = vk::BufferImageCopy::default()
-        .buffer_offset(0)
-        .buffer_row_length(0)
-        .buffer_image_height(0)
-        .image_subresource(vk::ImageSubresourceLayers {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            mip_level: 0,
-            base_array_layer: 0,
-            layer_count: 1,
-        })
-        .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-        .image_extent(vk::Extent3D { width, height, depth: 1 });
-    unsafe {
-        device.cmd_copy_buffer_to_image(
-            command_buffer,
-            buffer,
+        let bg_blit = vk::ImageBlit::default()
+            .src_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0, base_array_layer: 0, layer_count: 1,
+            })
+            .src_offsets([
+                vk::Offset3D { x: bg_sx as i32, y: bg_sy as i32, z: 0 },
+                vk::Offset3D { x: (bg_sx + bg_sw) as i32, y: (bg_sy + bg_sh) as i32, z: 1 },
+            ])
+            .dst_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0, base_array_layer: 0, layer_count: 1,
+            })
+            .dst_offsets([
+                vk::Offset3D { x: 0, y: 0, z: 0 },
+                vk::Offset3D { x: layer_width as i32, y: layer_height as i32, z: 1 },
+            ]);
+        unsafe {
+            self.device.cmd_blit_image(
+                command_buffer,
+                bg_image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                target_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[bg_blit],
+                vk::Filter::LINEAR,
+            );
+        }
+    }
+}
+
+
+// --------------------------------------------------------------------- / create buffer
+
+impl VulkanCore {
+    pub fn create_buffer(
+        &self,
+        data: &[u8],
+    ) -> Result<(vk::Buffer, vk::DeviceMemory), Box<dyn std::error::Error>> {
+        let size = data.len() as u64;
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let buffer = unsafe { self.device.create_buffer(&buffer_info, None)? };
+        let mem_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+
+        let memory_type_index = self.memory_type(
+            mem_requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(mem_requirements.size)
+            .memory_type_index(memory_type_index);
+        let memory = unsafe { self.device.allocate_memory(&alloc_info, None)? };
+
+        unsafe { self.device.bind_buffer_memory(buffer, memory, 0) }?;
+
+        let ptr = unsafe {
+            self.device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty())?
+        } as *mut u8;
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len()) };
+        unsafe { self.device.unmap_memory(memory) };
+
+        Ok((buffer, memory))
+    }
+}
+
+
+// --------------------------------------------------------------------- / create texture
+
+impl VulkanCore {
+    pub fn create_texture(
+        &self,
+        width: u32,
+        height: u32,
+        usage: vk::ImageUsageFlags,
+        format: vk::Format,
+    ) -> Result<(vk::Image, vk::DeviceMemory), Box<dyn std::error::Error>> {
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let image = unsafe { self.device.create_image(&image_info, None)? };
+        let mem_requirements = unsafe { self.device.get_image_memory_requirements(image) };
+
+        let memory_type_index = self.memory_type(
+            mem_requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        );
+
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(mem_requirements.size)
+            .memory_type_index(memory_type_index);
+        let memory = unsafe { self.device.allocate_memory(&alloc_info, None)? };
+
+        unsafe { self.device.bind_image_memory(image, memory, 0) }?;
+
+        Ok((image, memory))
+    }
+}
+
+
+// --------------------------------------------------------------------- / load texture
+
+impl VulkanCore {
+    fn load_texture(
+        &self,
+        buffer: vk::Buffer,
+        image: vk::Image,
+        width: u32,
+        height: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        unsafe {
+            self.device
+                .reset_command_pool(self.command_pool, vk::CommandPoolResetFlags::empty())?;
+        }
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe {
+            self.device
+                .begin_command_buffer(self.command_buffer, &begin_info)?;
+        }
+
+        // transition texture to transfer dst
+        self.image_barrier(
+            self.command_buffer,
+            image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::AccessFlags::empty(),
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::TRANSFER,
+        );
+
+        // copy buffer to image
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D { width, height, depth: 1 });
+        unsafe {
+            self.device.cmd_copy_buffer_to_image(
+                self.command_buffer,
+                buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+        }
+
+        // transition texture to shader read only
+        self.image_barrier(
+            self.command_buffer,
             image,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &[region],
-        );
-    }
-
-    // make the texture readable by shaders
-    let barrier2 = vk::ImageMemoryBarrier::default()
-        .image(image)
-        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .dst_access_mask(vk::AccessFlags::SHADER_READ)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-    unsafe {
-        device.cmd_pipeline_barrier(
-            command_buffer,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::AccessFlags::SHADER_READ,
             vk::PipelineStageFlags::TRANSFER,
             vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[barrier2],
         );
+
+        unsafe {
+            self.device.end_command_buffer(self.command_buffer)?;
+        }
+
+        let submit_info = vk::SubmitInfo::default()
+            .command_buffers(std::slice::from_ref(&self.command_buffer));
+        let fence = unsafe {
+            self.device
+                .create_fence(&vk::FenceCreateInfo::default(), None)?
+        };
+        unsafe {
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], fence)?;
+            self.device
+                .wait_for_fences(&[fence], true, u64::MAX)?;
+            self.device.destroy_fence(fence, None);
+        }
+
+        Ok(())
     }
+}
 
-    // finish recording commands
-    unsafe { device.end_command_buffer(command_buffer) }?;
 
-    // submit recording commands
-    let submit_info = vk::SubmitInfo::default()
-        .command_buffers(std::slice::from_ref(&command_buffer));
-    let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }?;
-    unsafe { device.queue_submit(graphics_queue, &[submit_info], fence) }?;
-    unsafe { device.wait_for_fences(&[fence], true, u64::MAX) }?;
-    unsafe { device.destroy_fence(fence, None) };
+// --------------------------------------------------------------------- / upload texture
 
-    Ok(())
+impl VulkanCore {
+    pub fn upload_texture(
+        &self,
+        pixel_bytes: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<VulkanTexture, Box<dyn std::error::Error>> {
+
+        // copy raw image data to staging buffer
+        let (buffer, memory) = self.create_buffer(pixel_bytes)?;
+
+        // allocate vram for image data
+        let (texture, vram) = self.create_texture(
+            width,
+            height,
+            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            vk::Format::R8G8B8A8_SRGB,
+        )?;
+
+        // load pixel data from buffer to texture
+        self.load_texture(buffer, texture, width, height)?;
+
+        // drop the staging buffer (no longer needed)
+        unsafe {
+            self.device.destroy_buffer(buffer, None);
+            self.device.free_memory(memory, None);
+        }
+
+        Ok(VulkanTexture {
+            image: texture,
+            _memory: vram,
+            width,
+            height,
+        })
+    }
 }
 
 
 // --------------------------------------------------------------------- / draw wallpaper
 
-pub fn draw_wallpaper(
-    instance: &ash::Instance,
-    device: &ash::Device,
-    graphics_queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
-    swapchain: vk::SwapchainKHR,
-    swapchain_images: &[vk::Image],
-    texture_image: vk::Image,
-    texture_width: u32,
-    texture_height: u32,
-    swapchain_extent_width: u32,
-    swapchain_extent_height: u32,
-    anchor_x: f32,
-    anchor_y: f32,
-    blur_bg: Option<(vk::Image, u32, u32)>,
-    mode: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+impl VulkanCore {
+    pub fn draw_wallpaper(
+        &self,
+        surfchain: &VulkanSurfchain,
+        texture: &VulkanTexture,
+        layer_width: u32,
+        layer_height: u32,
+        anchor_x: f32,
+        anchor_y: f32,
+        background: Option<(vk::Image, u32, u32)>,
+        mode: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let swapchain_loader = ash::khr::swapchain::Device::new(&self.instance, &self.device);
+        let (image_index, _suboptimal) = match unsafe {
+            swapchain_loader.acquire_next_image(
+                surfchain.swapchain,
+                u64::MAX,
+                vk::Semaphore::null(),
+                vk::Fence::null(),
+            )
+        } {
+            Ok((idx, suboptimal)) => (idx, suboptimal),
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                return Err("swapchain out of date (acquire)".into());
+            }
+            Err(e) => return Err(Box::new(e)),
+        };
+        let target_image = surfchain.swapchain_images[image_index as usize];
 
-    // acquire swapchain image
-    let swapchain_loader = ash::khr::swapchain::Device::new(instance, device);
-    let (image_index, _suboptimal) = match unsafe {
-        swapchain_loader.acquire_next_image(
-            swapchain,
-            u64::MAX,
-            vk::Semaphore::null(),
-            vk::Fence::null(),
-        )
-    } {
-        Ok((idx, suboptimal)) => (idx, suboptimal),
-        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-            return Err("swapchain out of date (acquire)".into());
-        }
-        Err(e) => return Err(Box::new(e)),
-    };
-    let target_image = swapchain_images[image_index as usize];
+            self.record_commands(|command_buffer| {
 
-    // reuse the persistent command buffer
-    unsafe { device.reset_command_pool(command_pool, vk::CommandPoolResetFlags::empty()) }?;
+                // transition texture to transfer source
+                self.image_barrier(
+                    command_buffer,
+                    texture.image,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::AccessFlags::SHADER_READ,
+                    vk::AccessFlags::TRANSFER_READ,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                );
 
-    // begin recording commands
-    let begin_info = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-    unsafe { device.begin_command_buffer(command_buffer, &begin_info) }?;
+                // transition swapchain image to transfer destination
+                self.image_barrier(
+                    command_buffer,
+                    target_image,
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::AccessFlags::empty(),
+                    vk::AccessFlags::TRANSFER_WRITE,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                );
 
-    // transition texture read-only access to source image transfer command
-    let texture_barrier = vk::ImageMemoryBarrier::default()
-        .image(texture_image)
-        .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-        .src_access_mask(vk::AccessFlags::SHADER_READ)
-        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-
-    // transition swapchain unknown layout to destination image transfer command
-    let swapchain_barrier = vk::ImageMemoryBarrier::default()
-        .image(target_image)
-        .old_layout(vk::ImageLayout::UNDEFINED)
-        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-        .src_access_mask(vk::AccessFlags::empty())
-        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-
-    // execute both source and destination barriers
-    unsafe {
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[texture_barrier, swapchain_barrier],
-        );
-    }
-
-    // compute source and destination rectangles based on mode
-    let (src_x, src_y, src_w, src_h, dst_x, dst_y, dst_w, dst_h, needs_clear) = mode_set(
-        texture_width, texture_height,
-        swapchain_extent_width, swapchain_extent_height,
-        anchor_x, anchor_y,
-        mode,
-    );
-
-    // if the mode requires background, fill with blurred wallpaper or black
-    if needs_clear {
-        match blur_bg {
-            Some((bg_image, bg_w, bg_h)) => {
-                // Compute a cover-crop rectangle for the blurred background
-                let bg_aspect = bg_w as f64 / bg_h as f64;
-                let scr_aspect = swapchain_extent_width as f64 / swapchain_extent_height as f64;
-                let (bg_sx, bg_sy, bg_sw, bg_sh) = if bg_aspect > scr_aspect {
-                    // background wider → crop left/right (centered)
-                    let new_w = (bg_h as f64 * scr_aspect) as u32;
-                    let x = (bg_w - new_w) / 2;
-                    (x, 0, new_w, bg_h)
-                } else {
-                    // background taller → crop top/bottom (centered)
-                    let new_h = (bg_w as f64 / scr_aspect) as u32;
-                    let y = (bg_h - new_h) / 2;
-                    (0, y, bg_w, new_h)
-                };
-
-                // Transition bg image to TRANSFER_SRC_OPTIMAL
-                let bg_barrier = vk::ImageMemoryBarrier::default()
-                    .image(bg_image)
-                    .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::SHADER_READ)
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0, level_count: 1,
-                        base_array_layer: 0, layer_count: 1,
-                    });
-                unsafe {
-                    device.cmd_pipeline_barrier(
-                        command_buffer,
-                        vk::PipelineStageFlags::TOP_OF_PIPE,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(),
-                        &[], &[], &[bg_barrier],
+                // compute source and destination rectangles based on mode
+                let (src_x, src_y, src_w, src_h, dst_x, dst_y, dst_w, dst_h, needs_clear) =
+                    mode_set(
+                        texture.width, texture.height,
+                        layer_width, layer_height,
+                        anchor_x, anchor_y,
+                        mode,
                     );
+
+                if needs_clear {
+                    let bg = background.expect("background must exist for fit/original mode");
+                    self.fill_background(command_buffer, target_image, bg, layer_width, layer_height);
                 }
 
-                // Blit the cropped background to cover the entire screen
-                let bg_blit = vk::ImageBlit::default()
+                // blit main wallpaper
+                let blit_region = vk::ImageBlit::default()
                     .src_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: 0,
-                        base_array_layer: 0,
-                        layer_count: 1,
+                        mip_level: 0, base_array_layer: 0, layer_count: 1,
                     })
                     .src_offsets([
-                        vk::Offset3D { x: bg_sx as i32, y: bg_sy as i32, z: 0 },
-                        vk::Offset3D { x: (bg_sx + bg_sw) as i32, y: (bg_sy + bg_sh) as i32, z: 1 },
+                        vk::Offset3D { x: src_x as i32, y: src_y as i32, z: 0 },
+                        vk::Offset3D { x: (src_x + src_w) as i32, y: (src_y + src_h) as i32, z: 1 },
                     ])
                     .dst_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: 0,
-                        base_array_layer: 0,
-                        layer_count: 1,
+                        mip_level: 0, base_array_layer: 0, layer_count: 1,
                     })
                     .dst_offsets([
-                        vk::Offset3D { x: 0, y: 0, z: 0 },
-                        vk::Offset3D { x: swapchain_extent_width as i32, y: swapchain_extent_height as i32, z: 1 },
+                        vk::Offset3D { x: dst_x, y: dst_y, z: 0 },
+                        vk::Offset3D { x: dst_x + dst_w as i32, y: dst_y + dst_h as i32, z: 1 },
                     ]);
                 unsafe {
-                    device.cmd_blit_image(
+                    self.device.cmd_blit_image(
                         command_buffer,
-                        bg_image,
+                        texture.image,
                         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                         target_image,
                         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        &[bg_blit],
+                        &[blit_region],
                         vk::Filter::LINEAR,
                     );
                 }
+
+                // transition swapchain image to present layout
+                self.image_barrier(
+                    command_buffer,
+                    target_image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::PRESENT_SRC_KHR,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                    vk::AccessFlags::MEMORY_READ,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                );
+            })?;
+
+        // present the final image
+        let present_info = vk::PresentInfoKHR::default()
+            .swapchains(std::slice::from_ref(&surfchain.swapchain))
+            .image_indices(std::slice::from_ref(&image_index));
+
+        let result = unsafe { swapchain_loader.queue_present(self.graphics_queue, &present_info) };
+        match result {
+            Ok(_) => Ok(()),
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                Err("swapchain out of date (present)".into())
             }
-            None => {
-                // fallback to solid black
-                let clear_color = vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] };
-                let clear_range = vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0, level_count: 1,
-                    base_array_layer: 0, layer_count: 1,
-                };
-                unsafe {
-                    device.cmd_clear_color_image(
-                        command_buffer,
-                        target_image,
-                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        &clear_color,
-                        &[clear_range],
-                    );
-                }
-            }
+            Err(vk::Result::SUBOPTIMAL_KHR) => Ok(()),
+            Err(e) => Err(Box::new(e)),
         }
-    }
-
-    // record the blit command
-    let blit_region = vk::ImageBlit::default()
-        .src_subresource(vk::ImageSubresourceLayers {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            mip_level: 0,
-            base_array_layer: 0,
-            layer_count: 1,
-        })
-        .src_offsets([
-            vk::Offset3D {
-                x: src_x as i32,
-                y: src_y as i32,
-                z: 0,
-            },
-            vk::Offset3D {
-                x: (src_x + src_w) as i32,
-                y: (src_y + src_h) as i32,
-                z: 1,
-            },
-        ])
-        .dst_subresource(vk::ImageSubresourceLayers {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            mip_level: 0,
-            base_array_layer: 0,
-            layer_count: 1,
-        })
-        .dst_offsets([
-            vk::Offset3D { x: dst_x, y: dst_y, z: 0 },
-            vk::Offset3D { x: dst_x + dst_w as i32, y: dst_y + dst_h as i32, z: 1 },
-        ]);
-    unsafe {
-        device.cmd_blit_image(
-            command_buffer,
-            texture_image,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            target_image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &[blit_region],
-            vk::Filter::LINEAR,
-        );
-    }
-
-    // transition swapchain to readable layout for compositor
-    let present_barrier = vk::ImageMemoryBarrier::default()
-        .image(target_image)
-        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-        .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .dst_access_mask(vk::AccessFlags::MEMORY_READ)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-    unsafe {
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[present_barrier],
-        );
-    }
-
-    // finish recording commands
-    unsafe { device.end_command_buffer(command_buffer) }?;
-
-    // submit recording commands
-    let submit_info = vk::SubmitInfo::default()
-        .command_buffers(std::slice::from_ref(&command_buffer));
-    let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }?;
-    unsafe { device.queue_submit(graphics_queue, &[submit_info], fence) }?;
-    unsafe { device.wait_for_fences(&[fence], true, u64::MAX) }?;
-    unsafe { device.destroy_fence(fence, None) };
-
-    // present the image
-    let present_info = vk::PresentInfoKHR::default()
-        .swapchains(std::slice::from_ref(&swapchain))
-        .image_indices(std::slice::from_ref(&image_index));
-
-    let result = unsafe { swapchain_loader.queue_present(graphics_queue, &present_info) };
-    match result {
-        Ok(_) => return Ok(()),
-        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {return Err("swapchain out of date (present)".into())}
-        Err(vk::Result::SUBOPTIMAL_KHR) => return Ok(()),
-        Err(e) => return Err(Box::new(e)),
     }
 }
 
@@ -812,7 +770,6 @@ fn mode_set(
     anchor_y: f32,
     mode: &str,
 ) -> (u32, u32, u32, u32, i32, i32, u32, u32, bool) {
-
     if mode == "fit" {
         let scale = (scr_w as f64 / img_w as f64).min(scr_h as f64 / img_h as f64);
         let sw = (img_w as f64 * scale) as u32;
@@ -845,7 +802,7 @@ fn mode_set(
 }
 
 
-// --------------------------------------------------------------------- / destroy level
+// --------------------------------------------------------------------- / destroy core
 
 pub fn destroy_wallbash(
     vk_core: &VulkanCore,
@@ -856,7 +813,7 @@ pub fn destroy_wallbash(
     level: u32,
 ) {
 
-    // Destroy filter resources if provided and level ≥ 0
+    // destroy filter resources if provided and level ≥ 0
     if let (Some(module), Some(pipeline), Some(desc)) = (filter_module, filter_pipeline, filter_desc_layout) {
         unsafe {
             vk_core.device.destroy_pipeline(pipeline, None);
@@ -865,7 +822,7 @@ pub fn destroy_wallbash(
         }
     }
 
-    // Destroy swapchain and surface (level ≥ 1)
+    // destroy swapchain and surface (level ≥ 1)
     if level >= 1 {
         if let Some(sc) = surfchain {
             unsafe {
@@ -877,7 +834,7 @@ pub fn destroy_wallbash(
         }
     }
 
-    // Destroy core Vulkan objects (level ≥ 2)
+    // destroy core Vulkan objects (level ≥ 2)
     if level >= 2 {
         unsafe {
             vk_core.device.device_wait_idle().expect("device wait failed");

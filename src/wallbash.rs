@@ -74,12 +74,7 @@ fn set_wallpaper(
     let pixel_bytes = pixel_format.into_raw();
 
     // call the vulkan pipeline
-    let texture = vulkan::vulkan_pipeline(
-        vk_core,
-        &pixel_bytes,
-        img.width(),
-        img.height(),
-    )?;
+    let texture = vk_core.upload_texture(&pixel_bytes, img.width(), img.height(),)?;
 
     // drop the old texture resources (if any)
     if let Some(old_tex) = wallpaper.take() {
@@ -95,17 +90,9 @@ fn set_wallpaper(
     let background = background_texture.as_ref().map(|b| (b.image, b.width, b.height));
 
     // draw the wallpaper
-    vulkan::draw_wallpaper(
-        &vk_core.instance,
-        &vk_core.device,
-        vk_core.graphics_queue,
-        vk_core.command_pool,
-        vk_core.command_buffer,
-        vk_surfchain.swapchain,
-        &vk_surfchain.swapchain_images,
-        wallpaper.as_ref().unwrap().image,
-        img.width(),
-        img.height(),
+    vk_core.draw_wallpaper(
+        vk_surfchain,
+        wallpaper.as_ref().unwrap(),
         layer_width,
         layer_height,
         anchor_x,
