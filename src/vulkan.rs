@@ -239,46 +239,46 @@ pub fn vulkan_surfchain(
 }
 
 
-// --------------------------------------------------------------------- / record commands
+// --------------------------------------------------------------------- / set mode
 
-impl VulkanCore {
-    pub(crate) fn record_commands(
-        &self,
-        f: impl FnOnce(vk::CommandBuffer),
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        unsafe {
-            self.device
-                .reset_command_pool(self.command_pool, vk::CommandPoolResetFlags::empty())?;
-        }
-
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        unsafe {
-            self.device
-                .begin_command_buffer(self.command_buffer, &begin_info)?;
-        }
-
-        f(self.command_buffer);
-        unsafe {
-            self.device.end_command_buffer(self.command_buffer)?;
-        }
-
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(std::slice::from_ref(&self.command_buffer));
-        let fence = unsafe {
-            self.device
-                .create_fence(&vk::FenceCreateInfo::default(), None)?
-        };
-        unsafe {
-            self.device
-                .queue_submit(self.graphics_queue, &[submit_info], fence)?;
-            self.device
-                .wait_for_fences(&[fence], true, u64::MAX)?;
-            self.device.destroy_fence(fence, None);
-        }
-
-        Ok(())
+fn mode_set(
+    img_w: u32,
+    img_h: u32,
+    scr_w: u32,
+    scr_h: u32,
+    anchor_x: f32,
+    anchor_y: f32,
+    mode: &str,
+) -> (u32, u32, u32, u32, i32, i32, u32, u32, bool) {
+    if mode == "fit" {
+        let scale = (scr_w as f64 / img_w as f64).min(scr_h as f64 / img_h as f64);
+        let sw = (img_w as f64 * scale) as u32;
+        let sh = (img_h as f64 * scale) as u32;
+        let dx = ((scr_w - sw) as f32 * anchor_x) as i32;
+        let dy = ((scr_h - sh) as f32 * anchor_y) as i32;
+        return (0, 0, img_w, img_h, dx, dy, sw, sh, true);
     }
+    if mode == "original" {
+        if img_w <= scr_w && img_h <= scr_h {
+            let dx = ((scr_w - img_w) as f32 * anchor_x) as i32;
+            let dy = ((scr_h - img_h) as f32 * anchor_y) as i32;
+            return (0, 0, img_w, img_h, dx, dy, img_w, img_h, true);
+        }
+    }
+    let src_aspect = img_w as f64 / img_h as f64;
+    let dst_aspect = scr_w as f64 / scr_h as f64;
+    let (sx, sy, sw, sh) = if src_aspect > dst_aspect {
+        let new_w = (img_h as f64 * dst_aspect) as u32;
+        let max_x = (img_w - new_w) as f32;
+        let x = (max_x * anchor_x) as u32;
+        (x, 0, new_w, img_h)
+    } else {
+        let new_h = (img_w as f64 / dst_aspect) as u32;
+        let max_y = (img_h - new_h) as f32;
+        let y = (max_y * anchor_y) as u32;
+        (0, y, img_w, new_h)
+    };
+    (sx, sy, sw, sh, 0, 0, scr_w, scr_h, false)
 }
 
 
@@ -342,6 +342,49 @@ impl VulkanCore {
                 &[barrier],
             );
         }
+    }
+}
+
+
+// --------------------------------------------------------------------- / record commands
+
+impl VulkanCore {
+    pub(crate) fn record_commands(
+        &self,
+        f: impl FnOnce(vk::CommandBuffer),
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        unsafe {
+            self.device
+                .reset_command_pool(self.command_pool, vk::CommandPoolResetFlags::empty())?;
+        }
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe {
+            self.device
+                .begin_command_buffer(self.command_buffer, &begin_info)?;
+        }
+
+        f(self.command_buffer);
+        unsafe {
+            self.device.end_command_buffer(self.command_buffer)?;
+        }
+
+        let submit_info = vk::SubmitInfo::default()
+            .command_buffers(std::slice::from_ref(&self.command_buffer));
+        let fence = unsafe {
+            self.device
+                .create_fence(&vk::FenceCreateInfo::default(), None)?
+        };
+        unsafe {
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], fence)?;
+            self.device
+                .wait_for_fences(&[fence], true, u64::MAX)?;
+            self.device.destroy_fence(fence, None);
+        }
+
+        Ok(())
     }
 }
 
@@ -756,49 +799,6 @@ impl VulkanCore {
             Err(e) => Err(Box::new(e)),
         }
     }
-}
-
-
-// --------------------------------------------------------------------- / set mode
-
-fn mode_set(
-    img_w: u32,
-    img_h: u32,
-    scr_w: u32,
-    scr_h: u32,
-    anchor_x: f32,
-    anchor_y: f32,
-    mode: &str,
-) -> (u32, u32, u32, u32, i32, i32, u32, u32, bool) {
-    if mode == "fit" {
-        let scale = (scr_w as f64 / img_w as f64).min(scr_h as f64 / img_h as f64);
-        let sw = (img_w as f64 * scale) as u32;
-        let sh = (img_h as f64 * scale) as u32;
-        let dx = ((scr_w - sw) as f32 * anchor_x) as i32;
-        let dy = ((scr_h - sh) as f32 * anchor_y) as i32;
-        return (0, 0, img_w, img_h, dx, dy, sw, sh, true);
-    }
-    if mode == "original" {
-        if img_w <= scr_w && img_h <= scr_h {
-            let dx = ((scr_w - img_w) as f32 * anchor_x) as i32;
-            let dy = ((scr_h - img_h) as f32 * anchor_y) as i32;
-            return (0, 0, img_w, img_h, dx, dy, img_w, img_h, true);
-        }
-    }
-    let src_aspect = img_w as f64 / img_h as f64;
-    let dst_aspect = scr_w as f64 / scr_h as f64;
-    let (sx, sy, sw, sh) = if src_aspect > dst_aspect {
-        let new_w = (img_h as f64 * dst_aspect) as u32;
-        let max_x = (img_w - new_w) as f32;
-        let x = (max_x * anchor_x) as u32;
-        (x, 0, new_w, img_h)
-    } else {
-        let new_h = (img_w as f64 / dst_aspect) as u32;
-        let max_y = (img_h - new_h) as f32;
-        let y = (max_y * anchor_y) as u32;
-        (0, y, img_w, new_h)
-    };
-    (sx, sy, sw, sh, 0, 0, scr_w, scr_h, false)
 }
 
 
