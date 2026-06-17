@@ -10,7 +10,7 @@ use crate::{vulkan, wayland, filters};
 use std::{
     os::unix::net::{UnixListener, UnixStream},
     io::{BufRead, BufReader},
-    sync::mpsc,
+    sync::mpsc,time::Instant,
 };
 
 
@@ -53,6 +53,19 @@ fn start_ipc(socket_path: &str) -> Result<mpsc::Receiver<String>, Box<dyn std::e
 }
 
 
+// --------------------------------------------------------------------- / timer
+
+fn timer<F, R>(label: &str, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let start = Instant::now();
+    let result = f();
+    println!("[perf] {}: {:.2?}", label, start.elapsed());
+    result
+}
+
+
 // --------------------------------------------------------------------- / wallpaper
 
 fn set_wallpaper(
@@ -69,12 +82,17 @@ fn set_wallpaper(
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     // load the wallpaper
-    let img = image::open(path)?;
-    let pixel_format = img.to_rgba8();
-    let pixel_bytes = pixel_format.into_raw();
+    let (img, pixel_bytes) = timer("load+decode", || {
+        let img = image::open(path).expect("failed to open image");
+        let rgba = img.to_rgba8();
+        let bytes = rgba.into_raw();
+        (img, bytes)
+    });
 
     // call the vulkan pipeline
-    let texture = vk_core.upload_texture(&pixel_bytes, img.width(), img.height(),)?;
+    let texture = timer("upload", || {
+        vk_core.upload_texture(&pixel_bytes, img.width(), img.height())
+    })?;
 
     // drop the old texture resources (if any)
     if let Some(old_tex) = wallpaper.take() {
@@ -86,20 +104,23 @@ fn set_wallpaper(
     *wallpaper = Some(texture);
 
     // create a blurred version for fit/original modes
-    let background_texture = effect(wallpaper.as_ref().unwrap());
-    let background = background_texture.as_ref().map(|b| (b.image, b.width, b.height));
+    let background_texture = timer("effect+draw", || {
+        let bg = effect(wallpaper.as_ref().unwrap());
+        let bg_params = bg.as_ref().map(|b| (b.image, b.width, b.height));
 
-    // draw the wallpaper
-    vk_core.draw_wallpaper(
-        vk_surfchain,
-        wallpaper.as_ref().unwrap(),
-        layer_width,
-        layer_height,
-        anchor_x,
-        anchor_y,
-        background,
-        mode,
-    )?;
+        vk_core.draw_wallpaper(
+            vk_surfchain,
+            wallpaper.as_ref().unwrap(),
+            layer_width,
+            layer_height,
+            anchor_x,
+            anchor_y,
+            bg_params,
+            mode,
+        )?;
+
+        Ok::<_, Box<dyn std::error::Error>>(bg)
+    })?;
 
     // destroy the temporary blurred texture (if any)
     if let Some(bg) = background_texture {
@@ -118,12 +139,22 @@ fn set_wallpaper(
 fn set_surfchain(
     vk_core: &vulkan::VulkanCore,
     wl_core: &wayland::WaylandCore,
-    old: Option<&mut vulkan::VulkanSurfchain>,
+    old: Option<vulkan::VulkanSurfchain>,
 ) -> Result<vulkan::VulkanSurfchain, Box<dyn std::error::Error>> {
 
     // destroy only the swapchain (level 1) – no filter resources
     if let Some(old_sc) = old {
-        vulkan::destroy_wallbash(vk_core, Some(old_sc), None, None, None, 1);
+        vulkan::destroy_wallbash(
+            vk_core,
+            vulkan::VulkanCleanup {
+                surfchain: Some(old_sc),
+                filter_module: None,
+                filter_pipeline: None,
+                filter_desc_layout: None,
+                wallpaper_texture: None,
+            },
+            1,
+        );
     }
 
     vulkan::vulkan_surfchain(
@@ -157,7 +188,7 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // init vulkan
     let vk_core = vulkan::vulkan_core()?;
     let (blur_module, blur_pipeline, blur_desc_layout) = filters::filter_pipeline(&vk_core.device, "blur")?;
-    let mut vk_surfchain = set_surfchain(&vk_core, &wl_core, None)?;
+    let mut vk_surfchain = Some(set_surfchain(&vk_core, &wl_core, None)?);
 
     // blank surface until a command arrives
     let mut wallpaper: Option<vulkan::VulkanTexture> = None;
@@ -171,7 +202,7 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         // check for commands from the IPC
         if let Ok(raw) = rx.try_recv() {
             let raw = raw.trim().to_string();
-            println!("[wallbash] received {}", raw);
+            println!("[wallbash] received '{:?}'", raw);
 
             if raw == "stop" {
                 println!("[wallbash] stopping daemon.");
@@ -207,7 +238,7 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 match set_wallpaper(
                     &resolved,
                     &vk_core,
-                    &vk_surfchain,
+                    vk_surfchain.as_ref().unwrap(),
                     wl_core.state.layer_width,
                     wl_core.state.layer_height,
                     &mut wallpaper,
@@ -221,19 +252,44 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                         println!("[wallbash] swapchain out of date, recreating...");
 
                         // destroy old swapchain and surface
-                        vk_surfchain = match set_surfchain(&vk_core, &wl_core, Some(&mut vk_surfchain)) {
-                            Ok(sc) => sc,
+                        match vulkan::vulkan_surfchain(
+                            &vk_core.entry,
+                            &vk_core.instance,
+                            vk_core.physical_device,
+                            vk_core.graphics_family_index,
+                            &vk_core.device,
+                            &wl_core.display,
+                            &wl_core.surface,
+                            wl_core.state.layer_width,
+                            wl_core.state.layer_height,
+                        ) {
+                            Ok(new_sc) => {
+                                // Destroy the old swapchain (now that we have a working new one)
+                                let old = vk_surfchain.take().unwrap();
+                                vulkan::destroy_wallbash(
+                                    &vk_core,
+                                    vulkan::VulkanCleanup {
+                                        surfchain: Some(old),
+                                        filter_module: None,
+                                        filter_pipeline: None,
+                                        filter_desc_layout: None,
+                                        wallpaper_texture: None,
+                                    },
+                                    1,
+                                );
+                                vk_surfchain = Some(new_sc);
+                            }
                             Err(e2) => {
                                 eprintln!("[wallbash] failed to recreate swapchain {}", e2);
                                 continue;
                             }
-                        };
+                        }
 
                         // retry setting the wallpaper once
                         if let Err(e3) = set_wallpaper(
                             &resolved,
                             &vk_core,
-                            &vk_surfchain,
+                            vk_surfchain.as_ref().unwrap(),
                             wl_core.state.layer_width,
                             wl_core.state.layer_height,
                             &mut wallpaper,
@@ -251,23 +307,19 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("[wallbash] unknown {}", raw);
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::thread::sleep(std::time::Duration::from_millis(16));
     }
 
     // clean shutdowon
-    unsafe { vk_core.device.device_wait_idle()?; }
-    if let Some(tex) = wallpaper.take() {
-        unsafe {
-            vk_core.device.destroy_image(tex.image, None);
-            vk_core.device.free_memory(tex._memory, None);
-        }
-    }
     vulkan::destroy_wallbash(
         &vk_core,
-        Some(&mut vk_surfchain),
-        Some(blur_module),
-        Some(blur_pipeline),
-        Some(blur_desc_layout),
+        vulkan::VulkanCleanup {
+            surfchain: vk_surfchain.take(),
+            filter_module: Some(blur_module),
+            filter_pipeline: Some(blur_pipeline),
+            filter_desc_layout: Some(blur_desc_layout),
+            wallpaper_texture: wallpaper.take(),
+        },
         2,
     );
 

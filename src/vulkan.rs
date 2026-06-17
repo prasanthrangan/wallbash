@@ -46,6 +46,14 @@ pub struct VulkanTexture {
     pub height: u32,
 }
 
+pub struct VulkanCleanup {
+    pub surfchain: Option<VulkanSurfchain>,
+    pub filter_module: Option<vk::ShaderModule>,
+    pub filter_pipeline: Option<vk::Pipeline>,
+    pub filter_desc_layout: Option<vk::DescriptorSetLayout>,
+    pub wallpaper_texture: Option<VulkanTexture>,
+}
+
 
 // --------------------------------------------------------------------- / init vulkan
 
@@ -239,46 +247,46 @@ pub fn vulkan_surfchain(
 }
 
 
-// --------------------------------------------------------------------- / record commands
+// --------------------------------------------------------------------- / set mode
 
-impl VulkanCore {
-    pub(crate) fn record_commands(
-        &self,
-        f: impl FnOnce(vk::CommandBuffer),
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        unsafe {
-            self.device
-                .reset_command_pool(self.command_pool, vk::CommandPoolResetFlags::empty())?;
-        }
-
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        unsafe {
-            self.device
-                .begin_command_buffer(self.command_buffer, &begin_info)?;
-        }
-
-        f(self.command_buffer);
-        unsafe {
-            self.device.end_command_buffer(self.command_buffer)?;
-        }
-
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(std::slice::from_ref(&self.command_buffer));
-        let fence = unsafe {
-            self.device
-                .create_fence(&vk::FenceCreateInfo::default(), None)?
-        };
-        unsafe {
-            self.device
-                .queue_submit(self.graphics_queue, &[submit_info], fence)?;
-            self.device
-                .wait_for_fences(&[fence], true, u64::MAX)?;
-            self.device.destroy_fence(fence, None);
-        }
-
-        Ok(())
+fn mode_set(
+    img_w: u32,
+    img_h: u32,
+    scr_w: u32,
+    scr_h: u32,
+    anchor_x: f32,
+    anchor_y: f32,
+    mode: &str,
+) -> (u32, u32, u32, u32, i32, i32, u32, u32, bool) {
+    if mode == "fit" {
+        let scale = (scr_w as f64 / img_w as f64).min(scr_h as f64 / img_h as f64);
+        let sw = (img_w as f64 * scale) as u32;
+        let sh = (img_h as f64 * scale) as u32;
+        let dx = ((scr_w - sw) as f32 * anchor_x) as i32;
+        let dy = ((scr_h - sh) as f32 * anchor_y) as i32;
+        return (0, 0, img_w, img_h, dx, dy, sw, sh, true);
     }
+    if mode == "original" {
+        if img_w <= scr_w && img_h <= scr_h {
+            let dx = ((scr_w - img_w) as f32 * anchor_x) as i32;
+            let dy = ((scr_h - img_h) as f32 * anchor_y) as i32;
+            return (0, 0, img_w, img_h, dx, dy, img_w, img_h, true);
+        }
+    }
+    let src_aspect = img_w as f64 / img_h as f64;
+    let dst_aspect = scr_w as f64 / scr_h as f64;
+    let (sx, sy, sw, sh) = if src_aspect > dst_aspect {
+        let new_w = (img_h as f64 * dst_aspect) as u32;
+        let max_x = (img_w - new_w) as f32;
+        let x = (max_x * anchor_x) as u32;
+        (x, 0, new_w, img_h)
+    } else {
+        let new_h = (img_w as f64 / dst_aspect) as u32;
+        let max_y = (img_h - new_h) as f32;
+        let y = (max_y * anchor_y) as u32;
+        (0, y, img_w, new_h)
+    };
+    (sx, sy, sw, sh, 0, 0, scr_w, scr_h, false)
 }
 
 
@@ -342,6 +350,49 @@ impl VulkanCore {
                 &[barrier],
             );
         }
+    }
+}
+
+
+// --------------------------------------------------------------------- / record commands
+
+impl VulkanCore {
+    pub(crate) fn record_commands(
+        &self,
+        f: impl FnOnce(vk::CommandBuffer),
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        unsafe {
+            self.device
+                .reset_command_pool(self.command_pool, vk::CommandPoolResetFlags::empty())?;
+        }
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe {
+            self.device
+                .begin_command_buffer(self.command_buffer, &begin_info)?;
+        }
+
+        f(self.command_buffer);
+        unsafe {
+            self.device.end_command_buffer(self.command_buffer)?;
+        }
+
+        let submit_info = vk::SubmitInfo::default()
+            .command_buffers(std::slice::from_ref(&self.command_buffer));
+        let fence = unsafe {
+            self.device
+                .create_fence(&vk::FenceCreateInfo::default(), None)?
+        };
+        unsafe {
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], fence)?;
+            self.device
+                .wait_for_fences(&[fence], true, u64::MAX)?;
+            self.device.destroy_fence(fence, None);
+        }
+
+        Ok(())
     }
 }
 
@@ -759,62 +810,20 @@ impl VulkanCore {
 }
 
 
-// --------------------------------------------------------------------- / set mode
-
-fn mode_set(
-    img_w: u32,
-    img_h: u32,
-    scr_w: u32,
-    scr_h: u32,
-    anchor_x: f32,
-    anchor_y: f32,
-    mode: &str,
-) -> (u32, u32, u32, u32, i32, i32, u32, u32, bool) {
-    if mode == "fit" {
-        let scale = (scr_w as f64 / img_w as f64).min(scr_h as f64 / img_h as f64);
-        let sw = (img_w as f64 * scale) as u32;
-        let sh = (img_h as f64 * scale) as u32;
-        let dx = ((scr_w - sw) as f32 * anchor_x) as i32;
-        let dy = ((scr_h - sh) as f32 * anchor_y) as i32;
-        return (0, 0, img_w, img_h, dx, dy, sw, sh, true);
-    }
-    if mode == "original" {
-        if img_w <= scr_w && img_h <= scr_h {
-            let dx = ((scr_w - img_w) as f32 * anchor_x) as i32;
-            let dy = ((scr_h - img_h) as f32 * anchor_y) as i32;
-            return (0, 0, img_w, img_h, dx, dy, img_w, img_h, true);
-        }
-    }
-    let src_aspect = img_w as f64 / img_h as f64;
-    let dst_aspect = scr_w as f64 / scr_h as f64;
-    let (sx, sy, sw, sh) = if src_aspect > dst_aspect {
-        let new_w = (img_h as f64 * dst_aspect) as u32;
-        let max_x = (img_w - new_w) as f32;
-        let x = (max_x * anchor_x) as u32;
-        (x, 0, new_w, img_h)
-    } else {
-        let new_h = (img_w as f64 / dst_aspect) as u32;
-        let max_y = (img_h - new_h) as f32;
-        let y = (max_y * anchor_y) as u32;
-        (0, y, img_w, new_h)
-    };
-    (sx, sy, sw, sh, 0, 0, scr_w, scr_h, false)
-}
-
-
 // --------------------------------------------------------------------- / destroy core
 
 pub fn destroy_wallbash(
     vk_core: &VulkanCore,
-    surfchain: Option<&mut VulkanSurfchain>,
-    filter_module: Option<vk::ShaderModule>,
-    filter_pipeline: Option<vk::Pipeline>,
-    filter_desc_layout: Option<vk::DescriptorSetLayout>,
+    config: VulkanCleanup,
     level: u32,
 ) {
 
-    // destroy filter resources if provided and level ≥ 0
-    if let (Some(module), Some(pipeline), Some(desc)) = (filter_module, filter_pipeline, filter_desc_layout) {
+    // destroy filter resources if provided
+    if let (Some(module), Some(pipeline), Some(desc)) = (
+        config.filter_module,
+        config.filter_pipeline,
+        config.filter_desc_layout,
+    ) {
         unsafe {
             vk_core.device.destroy_pipeline(pipeline, None);
             vk_core.device.destroy_descriptor_set_layout(desc, None);
@@ -824,21 +833,32 @@ pub fn destroy_wallbash(
 
     // destroy swapchain and surface (level ≥ 1)
     if level >= 1 {
-        if let Some(sc) = surfchain {
+        if let Some(sc) = config.surfchain {
             unsafe {
-                let swapchain_loader = ash::khr::swapchain::Device::new(&vk_core.instance, &vk_core.device);
+                let swapchain_loader =
+                    ash::khr::swapchain::Device::new(&vk_core.instance, &vk_core.device);
                 swapchain_loader.destroy_swapchain(sc.swapchain, None);
-                let surface_loader = ash::khr::surface::Instance::new(&vk_core.entry, &vk_core.instance);
+                let surface_loader =
+                    ash::khr::surface::Instance::new(&vk_core.entry, &vk_core.instance);
                 surface_loader.destroy_surface(sc.surface, None);
             }
         }
     }
 
-    // destroy core Vulkan objects (level ≥ 2)
+    // destroy wallpaper texture and core (level ≥ 2)
     if level >= 2 {
+        if let Some(tex) = config.wallpaper_texture {
+            unsafe {
+                vk_core.device.destroy_image(tex.image, None);
+                vk_core.device.free_memory(tex._memory, None);
+            }
+        }
         unsafe {
-            vk_core.device.device_wait_idle().expect("device wait failed");
-            vk_core.device.destroy_command_pool(vk_core.command_pool, None);
+            vk_core.device
+                .device_wait_idle()
+                .expect("device wait failed");
+            vk_core.device
+                .destroy_command_pool(vk_core.command_pool, None);
             vk_core.device.destroy_device(None);
             vk_core.instance.destroy_instance(None);
         }
