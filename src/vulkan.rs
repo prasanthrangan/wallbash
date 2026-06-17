@@ -46,6 +46,14 @@ pub struct VulkanTexture {
     pub height: u32,
 }
 
+pub struct VulkanCleanup {
+    pub surfchain: Option<VulkanSurfchain>,
+    pub filter_module: Option<vk::ShaderModule>,
+    pub filter_pipeline: Option<vk::Pipeline>,
+    pub filter_desc_layout: Option<vk::DescriptorSetLayout>,
+    pub wallpaper_texture: Option<VulkanTexture>,
+}
+
 
 // --------------------------------------------------------------------- / init vulkan
 
@@ -806,15 +814,16 @@ impl VulkanCore {
 
 pub fn destroy_wallbash(
     vk_core: &VulkanCore,
-    surfchain: Option<&mut VulkanSurfchain>,
-    filter_module: Option<vk::ShaderModule>,
-    filter_pipeline: Option<vk::Pipeline>,
-    filter_desc_layout: Option<vk::DescriptorSetLayout>,
+    config: VulkanCleanup,
     level: u32,
 ) {
 
-    // destroy filter resources if provided and level ≥ 0
-    if let (Some(module), Some(pipeline), Some(desc)) = (filter_module, filter_pipeline, filter_desc_layout) {
+    // destroy filter resources if provided
+    if let (Some(module), Some(pipeline), Some(desc)) = (
+        config.filter_module,
+        config.filter_pipeline,
+        config.filter_desc_layout,
+    ) {
         unsafe {
             vk_core.device.destroy_pipeline(pipeline, None);
             vk_core.device.destroy_descriptor_set_layout(desc, None);
@@ -824,21 +833,32 @@ pub fn destroy_wallbash(
 
     // destroy swapchain and surface (level ≥ 1)
     if level >= 1 {
-        if let Some(sc) = surfchain {
+        if let Some(sc) = config.surfchain {
             unsafe {
-                let swapchain_loader = ash::khr::swapchain::Device::new(&vk_core.instance, &vk_core.device);
+                let swapchain_loader =
+                    ash::khr::swapchain::Device::new(&vk_core.instance, &vk_core.device);
                 swapchain_loader.destroy_swapchain(sc.swapchain, None);
-                let surface_loader = ash::khr::surface::Instance::new(&vk_core.entry, &vk_core.instance);
+                let surface_loader =
+                    ash::khr::surface::Instance::new(&vk_core.entry, &vk_core.instance);
                 surface_loader.destroy_surface(sc.surface, None);
             }
         }
     }
 
-    // destroy core Vulkan objects (level ≥ 2)
+    // destroy wallpaper texture and core (level ≥ 2)
     if level >= 2 {
+        if let Some(tex) = config.wallpaper_texture {
+            unsafe {
+                vk_core.device.destroy_image(tex.image, None);
+                vk_core.device.free_memory(tex._memory, None);
+            }
+        }
         unsafe {
-            vk_core.device.device_wait_idle().expect("device wait failed");
-            vk_core.device.destroy_command_pool(vk_core.command_pool, None);
+            vk_core.device
+                .device_wait_idle()
+                .expect("device wait failed");
+            vk_core.device
+                .destroy_command_pool(vk_core.command_pool, None);
             vk_core.device.destroy_device(None);
             vk_core.instance.destroy_instance(None);
         }
