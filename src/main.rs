@@ -66,15 +66,15 @@ fn parse_args(args: &[String]) -> (String, String, f32, f32) {
         .and_then(|i| args.get(i + 1).cloned())
         .or_else(|| {
             args.iter().skip(2).scan(false, |skip, a| {
-                    if *skip {
-                        *skip = false;
-                        Some(None)
-                    } else if a.starts_with('-') {
-                        *skip = true;
-                        Some(None)
-                    } else {
-                        Some(Some(a.clone()))
-                    }
+                if *skip {
+                    *skip = false;
+                    Some(None)
+                } else if a.starts_with('-') {
+                    *skip = true;
+                    Some(None)
+                } else {
+                    Some(Some(a.clone()))
+                }
             })
             .flatten().last()
         })
