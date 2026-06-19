@@ -83,11 +83,11 @@ fn set_wallpaper(
 
     // load the wallpaper
     let (img, pixel_bytes) = timer("load+decode", || {
-        let img = image::open(path).expect("failed to open image");
+        let img = image::open(path)?;
         let rgba = img.to_rgba8();
         let bytes = rgba.into_raw();
-        (img, bytes)
-    });
+        Ok::<_, Box<dyn std::error::Error>>((img, bytes))
+    })?;
 
     // call the vulkan pipeline
     let texture = timer("upload", || {
@@ -202,7 +202,6 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         // check for commands from the IPC
         if let Ok(raw) = rx.try_recv() {
             let raw = raw.trim().to_string();
-            println!("[wallbash] received '{:?}'", raw);
 
             if raw == "stop" {
                 println!("[wallbash] stopping daemon.");
@@ -216,7 +215,7 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 let resolved = std::fs::canonicalize(&path)
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or(path);
-                println!("[wallbash] loading '{}' ({} | ax:{:?} | ay:{:?})", resolved, mode, anchor_x, anchor_y);
+                println!("[wallbash] loading '{}' ({}|ax:{:?}|ay:{:?})", resolved, mode, anchor_x, anchor_y);
 
                 // apply blur for non cover mode
                 let effect = |tex: &vulkan::VulkanTexture| {
