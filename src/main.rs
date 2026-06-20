@@ -10,6 +10,8 @@ pub mod wallbash;
 pub mod wayland;
 pub mod vulkan;
 pub mod filters;
+pub mod colors;
+
 use std::{
     env, io::Write,
     os::unix::net::UnixStream,
@@ -17,6 +19,7 @@ use std::{
     thread::sleep,
     time::Duration,
 };
+
 const SOCKET_PATH: &str = "/tmp/wallbash.sock";
 const LOG_FILE: &str = "/tmp/wallbash.log";
 
@@ -33,7 +36,8 @@ fn print_usage() {
 
     ::Options
         wallbash set [option] <value>
-            -m, --mode <mode>           | Scaling mode (cover, fit, original)
+            -p, --palette <color>       | Generate color palette (auto, dark, light)
+            -m, --mode <scale>          | Scaling mode (cover, fit, original)
             -a, --anchor <1-9>          | Anchor point (1=top-left ... 9=bottom-right)
             -w, --wall <file>           | Wallpaper file /path/to/file.img
 "   );
@@ -59,7 +63,7 @@ fn wait_loop() -> Result<(), Box<dyn std::error::Error>> {
     Err("Waiting for daemon...".into())
 }
 
-fn parse_args(args: &[String]) -> (String, String, f32, f32) {
+fn parse_args(args: &[String]) -> (String, String, f32, f32, String) {
 
     // wallpaper – mandatory
     let wall = args.iter().position(|a| a == "--wall" || a == "-w")
@@ -83,6 +87,13 @@ fn parse_args(args: &[String]) -> (String, String, f32, f32) {
             print_usage();
             std::process::exit(1);
         });
+
+    // color generation - default "skip" 
+    let palette = args.iter().position(|a| a == "--palette" || a == "-p")
+        .and_then(|i| args.get(i + 1))
+        .filter(|s| matches!(s.as_str(), "auto" | "dark" | "light"))
+        .map(|s| s.clone())
+        .unwrap_or_else(|| "skip".into());
 
     // mode – default "cover"
     let mode = args.iter().position(|a| a == "--mode" || a == "-m")
@@ -110,7 +121,7 @@ fn parse_args(args: &[String]) -> (String, String, f32, f32) {
         _ => (0.5, 0.5),
     };
 
-    (wall, mode, ax, ay)
+    (wall, mode, ax, ay, palette)
 }
 
 
@@ -129,8 +140,8 @@ fn main() {
             }
         }
         Some("set") => {
-            let (wall, mode, ax, ay) = parse_args(&args);
-            let cmd = format!("set{}\x01{}\x01{}\x01{}", mode, ax, ay, wall);
+            let (wall, mode, ax, ay, palette) = parse_args(&args);
+            let cmd = format!("set{}\x01{}\x01{}\x01{}\x01{}", palette, mode, ax, ay, wall);
             if !check_daemon() {
                 println!("Starting daemon");
                 let log_file = std::fs::File::create(LOG_FILE).expect("Cannot create log");

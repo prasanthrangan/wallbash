@@ -10,11 +10,12 @@ Use `wallbash` as a core component of your Wayland desktop environment — set w
 ## Features
 
 - Vulkan-powered GPU acceleration for smooth performance
-- Color palette generation for dynamic theming (WIP)
-- Fluid transitions and animations (WIP)
-- Multi-monitor support (WIP)
+- Color palette generation for dynamic theming
+- Fluid transitions and animations*
+- Multi-monitor support*
 - Scale and anchor the image to your liking
 - Dynamic blur fill for mismatched aspect ratios to eliminate black bars
+<div align="right"><body>*work in progress</body></div>
 
 
 ## Build
@@ -37,7 +38,8 @@ wallbash status                 #  Show daemon status
 
 # options for "set"
 wallbash set [option] <value>
-    -m, --mode <mode>           # Scaling mode (cover, fit, original)
+    -p, --palette <color>       # Generate color palette (auto, dark, light)
+    -m, --mode <scale>          # Scaling mode (cover, fit, original)
     -a, --anchor <1-9>          # Anchor point (1=top-left ... 9=bottom-right)
     -w, --wall <file>           # Wallpaper file /path/to/file.img
 ```
@@ -57,15 +59,17 @@ src/
 ├── wallbash.rs
 ├── wayland.rs
 ├── vulkan.rs
-└── filters.rs
+├── filters.rs
+└── colors.rs
 ```
 
 The core project is structured in simple modules:
 - `main.rs` Entry point of the binary. Works as a CLI tool to parse arguments and handle the daemon.
 - `wallbash.rs` The core daemon module. It manages the IPC listener, handles incoming commands, and orchestrates the wallpaper loading and rendering process.
 - `wayland.rs` Handles the Wayland integration. It creates a Wayland surface, binds to the layer shell protocol, and sets up the layer surface for the wallpaper.
-- `vulkan.rs` Manages the Vulkan rendering pipeline. It initializes the Vulkan instance, selects a physical device (preferring a discrete GPU), creates a swapchain, and renders the wallpaper image.
+- `vulkan.rs` Manages the Vulkan rendering pipeline. Initializes Vulkan instance, selects physical device (preferring discrete GPU), creates swapchain, and renders the wallpaper.
 - `filters.rs` – Implements image filters and post‑processing effects, including dynamic background blur, scaling algorithms, and other visual transformations.
+- `colors.rs` – Auto detects and generates light and dark color palettes from the wallpaper’s dominant color using k‑means clustering.
 
 ###### *<div align="right"><sub>// HyDE</sub></div>*
 <p align="center"><img src="https://github.com/prasanthrangan/hyprdots/blob/3c8b0dfb5e7f8e41a67b80463513f10d57cab1a4/Source/assets/Arch.svg" width="100"></p>
