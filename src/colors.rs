@@ -20,21 +20,36 @@ pub struct ColorPalette {
 
 // --------------------------------------------------------------------- / k‑means
 
-pub fn dcol(img: &DynamicImage) -> u32 {
+pub fn dcol(img: &DynamicImage, palette: &str) {
     let small = img.resize_exact(64, 64, image::imageops::FilterType::Nearest);
     let rgb = small.to_rgb8();
 
-    let pixels: Vec<[f64; 3]> = rgb
-        .pixels()
+    let total_l: f64 = rgb.pixels().map(|p| {
+        let r = p[0] as f64 / 255.0;
+        let g = p[1] as f64 / 255.0;
+        let b = p[2] as f64 / 255.0;
+        let r = if r <= 0.04045 { r / 12.92 } else { ((r + 0.055) / 1.055).powf(2.4) };
+        let g = if g <= 0.04045 { g / 12.92 } else { ((g + 0.055) / 1.055).powf(2.4) };
+        let b = if b <= 0.04045 { b / 12.92 } else { ((b + 0.055) / 1.055).powf(2.4) };
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }).sum();
+
+    let avg_l = total_l / (rgb.width() as f64 * rgb.height() as f64) * 100.0;
+    let mut mode = palette;
+    if palette == "auto" {
+        if avg_l > 50.0 { mode = "light" } else { mode = "dark" }
+    }
+
+    let pixels: Vec<[f64; 3]> = rgb.pixels()
         .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
         .collect();
 
     if pixels.is_empty() {
-        return rgb_to_argb(128, 128, 128);
+        print_palette (rgb_to_argb(128, 128, 128), mode)
     }
 
     let k = 5;
-    let max_iter = 8;
+    let max_iter = 10;
     let mut centroids = Vec::with_capacity(k);
     let mut lcg = 42u32;
     for _ in 0..k {
@@ -83,7 +98,7 @@ pub fn dcol(img: &DynamicImage) -> u32 {
     let r = dom[0].round().clamp(0.0, 255.0) as u8;
     let g = dom[1].round().clamp(0.0, 255.0) as u8;
     let b = dom[2].round().clamp(0.0, 255.0) as u8;
-    rgb_to_argb(r, g, b)
+    print_palette (rgb_to_argb(r, g, b), mode)
 }
 
 
@@ -190,10 +205,6 @@ pub fn generate_palette(dcol: u32) -> (Vec<ColorPalette>, Vec<ColorPalette>) {
         ("Tertiary",  "On Tertiary",         100.0, 20.0, 0.0,  0.0),
         ("Tertiary",  "Tertiary Container",  90.0,  30.0, 0.5,  0.0),
         ("Tertiary",  "On Tertiary Cont.",   10.0,  90.0, 0.0,  2.0),
-        ("Error",     "Error",               40.0,  80.0, 0.9,  0.0),
-        ("Error",     "On Error",            100.0, 20.0, 0.0,  0.0),
-        ("Error",     "Error Container",     90.0,  30.0, 0.7,  0.0),
-        ("Error",     "On Error Cont.",      10.0,  90.0, 0.0,  2.0),
         ("Surface",   "Background",          98.0,  6.0,  0.05, 0.0),
         ("Surface",   "On Background",       10.0,  90.0, 0.0,  2.0),
         ("Surface",   "Surface",             98.0,  6.0,  0.05, 0.0),
@@ -205,6 +216,10 @@ pub fn generate_palette(dcol: u32) -> (Vec<ColorPalette>, Vec<ColorPalette>) {
         ("Surface",   "Inverse Surface",     20.0,  90.0, 0.2,  0.0),
         ("Surface",   "Inverse On Surface",  95.0,  20.0, 0.0,  0.0),
         ("Surface",   "Inverse Primary",     80.0,  40.0, 0.4,  0.0),
+        ("Error",     "Error",               40.0,  80.0, 0.9,  0.0),
+        ("Error",     "On Error",            100.0, 20.0, 0.0,  0.0),
+        ("Error",     "Error Container",     90.0,  30.0, 0.7,  0.0),
+        ("Error",     "On Error Cont.",      10.0,  90.0, 0.0,  2.0),
     ];
 
     let mut light = Vec::new();
@@ -252,10 +267,10 @@ pub fn print_palette(dcol: u32, mode: &str) {
 
     print!("\x1b[48;2;{};{};{}m  \x1b[0m", r, g, b);
     if mode == "light" || (mode == "auto" && l_star > 55.0) {
-        println!("  #{:06X} :: Light     :: Dominant Color", dcol);
+        println!("  #{:06X} :: HyDE-Light :: Dominant Color", dcol);
         group_palette(&light);
     } else {
-        println!("  #{:06X} :: Dark      :: Dominant Color", dcol);
+        println!("  #{:06X} :: HyDE-Dark  :: Dominant Color", dcol);
         group_palette(&dark);
     }
 }
@@ -266,7 +281,7 @@ fn group_palette(palette: &[ColorPalette]) {
         let g = ((entry.argb >> 8) & 0xFF) as u8;
         let b = (entry.argb & 0xFF) as u8;
         print!("\x1b[48;2;{};{};{}m  \x1b[0m", r, g, b);
-        println!("  #{:06X} :: {:<9} :: {}", entry.argb, entry.group, entry.name);
+        println!("  #{:06X} :: {:<10} :: {}", entry.argb, entry.group, entry.name);
     }
 }
 

@@ -193,8 +193,7 @@ fn set_wallpaper(
 
     // generate colors
     if palette != "skip" {
-        let dcol = timer("dcols", || colors::dcol(&img));
-        colors::print_palette(dcol, &palette);
+        timer("dcols", || colors::dcol(&img, palette));
     }
 
     Ok(())
