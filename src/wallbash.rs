@@ -6,7 +6,7 @@
 
 // --------------------------------------------------------------------- / imports
 
-use crate::{vulkan, wayland, filters};
+use crate::{vulkan, wayland, filters, colors};
 use ash::vk;
 use std::{
     os::unix::net::{UnixListener, UnixStream},
@@ -20,7 +20,7 @@ use std::{
 enum Command {
     Stop,
     Status,
-    Set { mode: String, anchor_x: f32, anchor_y: f32, path: String },
+    Set { palette: String, mode: String, anchor_x: f32, anchor_y: f32, path: String },
 }
 
 struct DaemonState {
@@ -43,12 +43,13 @@ impl Command {
         if raw == "status" { return Command::Status; }
         if raw.starts_with("set") {
             let payload = &raw[3..];
-            let mut parts = payload.splitn(4, '\x01');
+            let mut parts = payload.splitn(5, '\x01');
+            let palette = parts.next().unwrap().to_string();
             let mode = parts.next().unwrap().to_string();
             let anchor_x = parts.next().unwrap().parse().unwrap();
             let anchor_y = parts.next().unwrap().parse().unwrap();
             let path = parts.next().unwrap().to_string();
-            return Command::Set { mode, anchor_x, anchor_y, path };
+            return Command::Set { palette, mode, anchor_x, anchor_y, path };
         }
         panic!("unknown internal command: {}", raw);
     }
@@ -138,6 +139,7 @@ fn set_wallpaper(
     anchor_y: f32,
     mode: &str,
     effect: impl FnOnce(&vulkan::VulkanTexture) -> Option<vulkan::VulkanTexture>,
+    palette: &String,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     // load the wallpaper
@@ -189,6 +191,12 @@ fn set_wallpaper(
         }
     }
 
+    // generate colors
+    if palette != "skip" {
+        let dcol = timer("dcols", || colors::dcol(&img));
+        colors::print_palette(dcol, &palette);
+    }
+
     Ok(())
 }
 
@@ -235,6 +243,7 @@ fn set_surfchain(
 impl DaemonState {
     fn set_command(
         &mut self,
+        palette: String,
         mode: String,
         anchor_x: f32,
         anchor_y: f32,
@@ -243,7 +252,7 @@ impl DaemonState {
         let resolved = std::fs::canonicalize(&path)
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or(path);
-        println!("[wallbash] loading '{}' ({}|ax:{:?}|ay:{:?})", resolved, mode, anchor_x, anchor_y);
+        println!("[wallbash] loading '{}' ({}|{}|ax:{:?}|ay:{:?})", resolved, palette, mode, anchor_x, anchor_y);
 
         let effect = |tex: &vulkan::VulkanTexture| {
             if mode != "cover" {
@@ -270,6 +279,7 @@ impl DaemonState {
             anchor_y,
             &mode,
             effect,
+            &palette,
         ) {
             Ok(()) => {
                 println!("[wallbash] wallpaper set.");
@@ -321,6 +331,7 @@ impl DaemonState {
                     anchor_y,
                     &mode,
                     effect,
+                    &palette,
                 ) {
                     eprintln!("[wallbash] error after swapchain recreation {}", e3);
                 }
@@ -359,8 +370,8 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 Command::Status => {
                     println!("[wallbash] daemon is running.");
                 }
-                Command::Set { mode, anchor_x, anchor_y, path } => {
-                    if state.set_command(mode, anchor_x, anchor_y, path).is_err()
+                Command::Set { palette, mode, anchor_x, anchor_y, path } => {
+                    if state.set_command(palette, mode, anchor_x, anchor_y, path).is_err()
                     {
                         continue;
                     }
