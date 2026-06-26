@@ -12,7 +12,7 @@ use std::f64::consts::PI;
 
 // --------------------------------------------------------------------- / datatypes
 
-pub struct ColorPalette {
+struct ColorPalette {
     group: &'static str,
     name:  &'static str,
     argb:  u32,
@@ -21,13 +21,24 @@ pub struct ColorPalette {
 struct ViewingConditions {
     fl:    f64,        // luminance-level adaptation factor
     aw:    f64,        // achromatic response of the white point
-    nbb:   f64,        // chromatic induction factor (background)
+    nb:    f64,        // chromatic induction factor (background)
     c:     f64,        // impact of lightness on chroma
     nc:    f64,        // chromatic induction factor (surround)
     n:     f64,        // relative luminance of background
-    z:     f64,        // exponent for computing J
-    rgb_d: [f64; 3],   // per channel chromatic adaptation factors
+    z:     f64,        // exponent for lightness
+    rgb_d: [f64; 3],   // per channel chromatic adaptation
 }
+
+const VC: ViewingConditions = ViewingConditions {
+    fl:    0.3885,
+    aw:    30.20,
+    nb:    1.0169,
+    c:     0.69,
+    nc:    1.0,
+    n:     0.1842,
+    z:     4.515,
+    rgb_d: [1.0215, 0.9863, 0.9339],
+};
 
 
 // --------------------------------------------------------------------- / sRGB ⇆ linear
@@ -113,7 +124,7 @@ fn lstar_to_y(lstar: f64) -> f64 {
 fn y_to_lstar(y: f64) -> f64 {
     let yn = y / 100.0;
 
-    // forward CIELAB function
+    // forward CIELab function
     let fy = if yn > 0.008856 { yn.cbrt() } else { 7.787 * yn + 16.0 / 116.0 };
 
     // offset and clamp
@@ -132,54 +143,6 @@ fn adapt(x: f64, fl: f64) -> f64 {
     // light adaptation for nonlinear response
     let p = (fl * x.abs() / 100.0).powf(0.42);
     x.signum() * 400.0 * p / (p + 27.13) + 0.1
-}
-
-
-// --------------------------------------------------------------------- / CAM16 viewing conditions
-
-impl ViewingConditions {
-    fn make() -> Self {
-
-        // map white to standard daylight illuminant
-        const WHITE: [f64; 3] = [95.047, 100.0, 108.883]; // XYZ coordinates of D65 daylight
-        let l_a = 200.0 / PI * lstar_to_y(50.0) / 100.0; // ≈ 11.73 cd/m²
-
-        // convert the white from XYZ to LMS cone using the M16 matrix
-        let rw = m16_r(WHITE[0], WHITE[1], WHITE[2]);
-        let gw = m16_g(WHITE[0], WHITE[1], WHITE[2]);
-        let bw = m16_b(WHITE[0], WHITE[1], WHITE[2]);
-
-        // average surround F=1.0 → c=0.69, N_c=1.0
-        let (f, c, nc) = (1.0_f64, 0.69_f64, 1.0_f64);
-
-        // degree of chromatic adaptation
-        let d = (f * (1.0 - (1.0 / 3.6) * ((-l_a - 42.0) / 92.0).exp())).clamp(0.0, 1.0);
-
-        // per channel adaptation factors
-        let rgb_d = [
-            d * 100.0 / rw + 1.0 - d,
-            d * 100.0 / gw + 1.0 - d,
-            d * 100.0 / bw + 1.0 - d,
-        ];
-
-        // luminance level adaptation
-        let k  = 1.0 / (5.0 * l_a + 1.0);
-        let k4 = k.powi(4);
-        let fl = k4 * l_a + 0.1 * (1.0 - k4).powi(2) * (5.0 * l_a).cbrt();
-
-        // background induction
-        let n   = lstar_to_y(50.0) / WHITE[1]; // ≈ 0.184
-        let z   = 1.48 + (50.0 * n).sqrt();
-        let nbb = 0.725 / n.powf(0.2);
-
-        // achromatic response of the white point
-        let rwa = adapt(rw * rgb_d[0], fl);
-        let gwa = adapt(gw * rgb_d[1], fl);
-        let bwa = adapt(bw * rgb_d[2], fl);
-        let aw  = (40.0 * rwa + 20.0 * gwa + bwa) / 20.0 * nbb;
-
-        ViewingConditions { fl, aw, nbb, c, nc, n, z, rgb_d }
-    }
 }
 
 
@@ -205,11 +168,11 @@ fn xyz_to_cam16(xyz: [f64; 3], vc: &ViewingConditions) -> (f64, f64, f64) {
     let h_rad = hue * PI / 180.0;
 
     // lightness
-    let j = 100.0 * (vc.nbb * p2 / vc.aw).powf(vc.c * vc.z);
+    let j = 100.0 * (vc.nb * p2 / vc.aw).powf(vc.c * vc.z);
 
     // colourfulness
     let e_hue = 0.25 * ((h_rad + 2.0).cos() + 3.8);
-    let p1 = e_hue * (50000.0 / 13.0) * vc.nc * vc.nbb;
+    let p1 = e_hue * (50000.0 / 13.0) * vc.nc * vc.nb;
     let t = p1 * (a * a + b_opp * b_opp).sqrt() / (p2 + 0.305);
     let alpha = t.powf(0.9) * (1.64 - 0.29_f64.powf(vc.n)).powf(0.73);
     let chroma = alpha * (j / 100.0).sqrt();
@@ -223,13 +186,13 @@ fn cam16_to_xyz(hue: f64, chroma: f64, j: f64, vc: &ViewingConditions) -> [f64; 
     if j < 1e-10 { return [0.0, 0.0, 0.0]; }
 
     // recompute supporting factors
-    let alpha  = if chroma < 1e-10 { 0.0 } else { chroma / (j / 100.0).sqrt() };
-    let t      = (alpha / (1.64 - 0.29_f64.powf(vc.n)).powf(0.73)).powf(1.0 / 0.9);
-    let h_rad  = hue * PI / 180.0;
-    let e_hue  = 0.25 * ((h_rad + 2.0).cos() + 3.8);
-    let ac     = vc.aw * (j / 100.0).powf(1.0 / (vc.c * vc.z));
-    let p1     = e_hue * (50000.0 / 13.0) * vc.nc * vc.nbb;
-    let p2     = ac / vc.nbb;
+    let alpha = if chroma < 1e-10 { 0.0 } else { chroma / (j / 100.0).sqrt() };
+    let t = (alpha / (1.64 - 0.29_f64.powf(vc.n)).powf(0.73)).powf(1.0 / 0.9);
+    let h_rad = hue * PI / 180.0;
+    let e_hue = 0.25 * ((h_rad + 2.0).cos() + 3.8);
+    let ac = vc.aw * (j / 100.0).powf(1.0 / (vc.c * vc.z));
+    let p1 = e_hue * (50000.0 / 13.0) * vc.nc * vc.nb;
+    let p2 = ac / vc.nb;
     let (hs, hc) = (h_rad.sin(), h_rad.cos());
 
     // recover opponent signals
@@ -354,9 +317,12 @@ fn lab_to_argb(lab: [f64; 3]) -> u32 {
 // --------------------------------------------------------------------- / kmeans quantiser
 
 pub fn dcol(img: &DynamicImage, palette: &str) {
+
+    // resize image for performance
     let small = img.resize_exact(64, 64, image::imageops::FilterType::Nearest);
     let rgb = small.to_rgb8();
 
+    // auto detect light or dark image
     let total_l: f64 = rgb.pixels().map(|p| {
         let r = srgb_to_linear(p[0] as f64 / 255.0);
         let g = srgb_to_linear(p[1] as f64 / 255.0);
@@ -364,31 +330,28 @@ pub fn dcol(img: &DynamicImage, palette: &str) {
         0.2126 * r + 0.7152 * g + 0.0722 * b
     }).sum();
     let avg_l = total_l / (rgb.width() as f64 * rgb.height() as f64) * 100.0;
-
     let palette: String = match palette {
         "dark"  => "dark".into(),
         "light" => "light".into(),
         _       => if avg_l < 50.0 { "dark".into() } else { "light".into() },
     };
 
+    // convert sRGB pixels to CIELab
     let pixels: Vec<[f64; 3]> = rgb.pixels()
         .map(|p| argb_to_lab(rgb_to_argb(p[0], p[1], p[2])))
         .collect();
 
-    if pixels.is_empty() {
-        generate_palette(rgb_to_argb(128, 128, 128), &palette);
-        return;
-    }
-
+    // k-means clustering
     let k = 8usize;
     let max_iter = 20;
     let mut centroids = Vec::with_capacity(k);
     let mut lcg = 42u32;
     for _ in 0..k {
-        lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        lcg = lcg.wrapping_mul(1664525).wrapping_add(1013904223);
         centroids.push(pixels[lcg as usize % pixels.len()]);
     }
 
+    // loop to find centres of the colour clusters
     let mut assignments = vec![0usize; pixels.len()];
     for _ in 0..max_iter {
         for (i, px) in pixels.iter().enumerate() {
@@ -414,6 +377,7 @@ pub fn dcol(img: &DynamicImage, palette: &str) {
         }
     }
 
+    // score cluster and pick the best dcol
     let mut cluster_counts = vec![0u32; k];
     for &a in &assignments { cluster_counts[a] += 1; }
     let total = pixels.len() as f64;
@@ -429,26 +393,24 @@ pub fn dcol(img: &DynamicImage, palette: &str) {
             score(a).partial_cmp(&score(b)).unwrap()
         })
         .unwrap_or(0);
-
     generate_palette(lab_to_argb(centroids[best]), &palette);
 }
 
 
 // --------------------------------------------------------------------- / generate palette
 
-pub fn generate_palette(source_argb: u32, palette: &str) {
-    let vc = ViewingConditions::make();
-    let (src_hue, src_chroma, src_tone) = argb_to_hct(source_argb, &vc);
+fn generate_palette(source_argb: u32, palette: &str) {
+    let (src_hue, src_chroma, src_tone) = argb_to_hct(source_argb, &VC);
 
     // material palette specs
     let pri_c = src_chroma.max(48.0);
-    let sec_c = 16.0_f64;
+    let sec_c = 16.0;
     let ter_h = (src_hue + 60.0).rem_euclid(360.0);
-    let ter_c = 24.0_f64;
-    let neu_c = 4.0_f64;
-    let nev_c = 8.0_f64;
-    let err_h = 25.0_f64;
-    let err_c = 84.0_f64;
+    let ter_c = 24.0;
+    let neu_c = 4.0;
+    let nev_c = 8.0;
+    let err_h = 25.0;
+    let err_c = 84.0;
 
     // group, name, hue, chroma, dark_tone, light_tone
     type Role = (&'static str, &'static str, f64, f64, f64, f64);
@@ -483,6 +445,7 @@ pub fn generate_palette(source_argb: u32, palette: &str) {
         ("Surface",   "Inverse Primary",     src_hue, pri_c, 80.0,  40.0),
     ];
 
+    // display dominant color
     let r = ((source_argb >> 16) & 0xFF) as u8;
     let g = ((source_argb >>  8) & 0xFF) as u8;
     let b = ( source_argb        & 0xFF) as u8;
@@ -492,10 +455,11 @@ pub fn generate_palette(source_argb: u32, palette: &str) {
         source_argb & 0xFFFFFF, palette, src_hue, src_chroma, src_tone
     );
 
+    // display generated palette
     let mut colors = Vec::with_capacity(roles.len());
     for &(group, name, hue, chroma, dark_tone, light_tone) in roles {
         let tone = if palette == "dark" { dark_tone } else { light_tone };
-        colors.push(ColorPalette { group, name, argb: hct_to_argb(hue, chroma, tone, &vc) });
+        colors.push(ColorPalette { group, name, argb: hct_to_argb(hue, chroma, tone, &VC) });
     }
     print_palette(colors);
 }
