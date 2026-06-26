@@ -69,7 +69,7 @@ The core project is structured in simple modules:
 - `wayland.rs` Handles the Wayland integration. It creates a Wayland surface, binds to the layer shell protocol, and sets up the layer surface for the wallpaper.
 - `vulkan.rs` Manages the Vulkan rendering pipeline. Initializes Vulkan instance, selects physical device (preferring discrete GPU), creates swapchain, and renders the wallpaper.
 - `filters.rs` – Implements image filters and post‑processing effects, including dynamic background blur, scaling algorithms, and other visual transformations.
-- `colors.rs` – Auto detects and generates light and dark color palettes from the wallpaper’s dominant color using k‑means clustering.
+- `colors.rs` – Auto detects and generates light and dark color palettes based on google's material design from the wallpaper’s dominant color using k‑means clustering.
 
 ###### *<div align="right"><sub>// HyDE</sub></div>*
 <p align="center"><img src="https://github.com/prasanthrangan/hyprdots/blob/3c8b0dfb5e7f8e41a67b80463513f10d57cab1a4/Source/assets/Arch.svg" width="100"></p>
