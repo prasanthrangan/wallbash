@@ -400,12 +400,12 @@ pub fn dcol(img: &DynamicImage, palette: &str) {
 // --------------------------------------------------------------------- / generate palette
 
 fn generate_palette(source_argb: u32, palette: &str) {
-    let (src_hue, src_chroma, src_tone) = argb_to_hct(source_argb, &VC);
+    let (src_h, src_c, src_t) = argb_to_hct(source_argb, &VC);
 
     // material palette specs
-    let pri_c = src_chroma.max(48.0);
+    let pri_c = src_c.max(48.0);
     let sec_c = 16.0;
-    let ter_h = (src_hue + 60.0).rem_euclid(360.0);
+    let ter_h = (src_h + 60.0).rem_euclid(360.0);
     let ter_c = 24.0;
     let neu_c = 4.0;
     let nev_c = 8.0;
@@ -415,34 +415,34 @@ fn generate_palette(source_argb: u32, palette: &str) {
     // group, name, hue, chroma, dark_tone, light_tone
     type Role = (&'static str, &'static str, f64, f64, f64, f64);
     let roles: &[Role] = &[
-        ("Primary",   "Primary",             src_hue, pri_c, 80.0,  40.0),
-        ("Primary",   "On Primary",          src_hue, pri_c, 20.0, 100.0),
-        ("Primary",   "Primary Container",   src_hue, pri_c, 30.0,  90.0),
-        ("Primary",   "On Primary Cont.",    src_hue, pri_c, 90.0,  10.0),
-        ("Secondary", "Secondary",           src_hue, sec_c, 80.0,  40.0),
-        ("Secondary", "On Secondary",        src_hue, sec_c, 20.0, 100.0),
-        ("Secondary", "Secondary Container", src_hue, sec_c, 30.0,  90.0),
-        ("Secondary", "On Secondary Cont.",  src_hue, sec_c, 90.0,  10.0),
-        ("Tertiary",  "Tertiary",            ter_h,   ter_c, 80.0,  40.0),
-        ("Tertiary",  "On Tertiary",         ter_h,   ter_c, 20.0, 100.0),
-        ("Tertiary",  "Tertiary Container",  ter_h,   ter_c, 30.0,  90.0),
-        ("Tertiary",  "On Tertiary Cont.",   ter_h,   ter_c, 90.0,  10.0),
-        ("Error",     "Error",               err_h,   err_c, 80.0,  40.0),
-        ("Error",     "On Error",            err_h,   err_c, 20.0, 100.0),
-        ("Error",     "Error Container",     err_h,   err_c, 30.0,  90.0),
-        ("Error",     "On Error Cont.",      err_h,   err_c, 90.0,  10.0),
-        ("Surface",   "Background",          src_hue, neu_c,  6.0,  98.0),
-        ("Surface",   "On Background",       src_hue, neu_c, 90.0,  10.0),
-        ("Surface",   "Surface",             src_hue, neu_c,  6.0,  98.0),
-        ("Surface",   "On Surface",          src_hue, neu_c, 90.0,  10.0),
-        ("Surface",   "Surface Variant",     src_hue, nev_c, 30.0,  90.0),
-        ("Surface",   "On Surface Variant",  src_hue, nev_c, 80.0,  30.0),
-        ("Surface",   "Outline",             src_hue, nev_c, 60.0,  50.0),
-        ("Surface",   "Outline Variant",     src_hue, nev_c, 30.0,  80.0),
-        ("Surface",   "Shadow",              src_hue, neu_c,  0.0,   0.0),
-        ("Surface",   "Inverse Surface",     src_hue, neu_c, 90.0,  20.0),
-        ("Surface",   "Inverse On Surface",  src_hue, neu_c, 20.0,  95.0),
-        ("Surface",   "Inverse Primary",     src_hue, pri_c, 80.0,  40.0),
+        ("Primary",   "Primary",                src_h, pri_c, 80.0,  40.0),
+        ("Primary",   "On Primary",             src_h, pri_c, 20.0, 100.0),
+        ("Primary",   "Primary Container",      src_h, pri_c, 30.0,  90.0),
+        ("Primary",   "On Primary Container",   src_h, pri_c, 90.0,  10.0),
+        ("Secondary", "Secondary",              src_h, sec_c, 80.0,  40.0),
+        ("Secondary", "On Secondary",           src_h, sec_c, 20.0, 100.0),
+        ("Secondary", "Secondary Container",    src_h, sec_c, 30.0,  90.0),
+        ("Secondary", "On Secondary Container", src_h, sec_c, 90.0,  10.0),
+        ("Tertiary",  "Tertiary",               ter_h, ter_c, 80.0,  40.0),
+        ("Tertiary",  "On Tertiary",            ter_h, ter_c, 20.0, 100.0),
+        ("Tertiary",  "Tertiary Container",     ter_h, ter_c, 30.0,  90.0),
+        ("Tertiary",  "On Tertiary Container",  ter_h, ter_c, 90.0,  10.0),
+        ("Error",     "Error",                  err_h, err_c, 80.0,  40.0),
+        ("Error",     "On Error",               err_h, err_c, 20.0, 100.0),
+        ("Error",     "Error Container",        err_h, err_c, 30.0,  90.0),
+        ("Error",     "On Error Container",     err_h, err_c, 90.0,  10.0),
+        ("Surface",   "Background",             src_h, neu_c,  6.0,  98.0),
+        ("Surface",   "On Background",          src_h, neu_c, 90.0,  10.0),
+        ("Surface",   "Surface",                src_h, neu_c,  6.0,  98.0),
+        ("Surface",   "On Surface",             src_h, neu_c, 90.0,  10.0),
+        ("Surface",   "Surface Variant",        src_h, nev_c, 30.0,  90.0),
+        ("Surface",   "On Surface Variant",     src_h, nev_c, 80.0,  30.0),
+        ("Surface",   "Outline",                src_h, nev_c, 60.0,  50.0),
+        ("Surface",   "Outline Variant",        src_h, nev_c, 30.0,  80.0),
+        ("Surface",   "Shadow",                 src_h, neu_c,  0.0,   0.0),
+        ("Surface",   "Inverse Surface",        src_h, neu_c, 90.0,  20.0),
+        ("Surface",   "Inverse On Surface",     src_h, neu_c, 20.0,  95.0),
+        ("Surface",   "Inverse Primary",        src_h, pri_c, 80.0,  40.0),
     ];
 
     // display dominant color
@@ -452,7 +452,7 @@ fn generate_palette(source_argb: u32, palette: &str) {
     print!("\x1b[48;2;{};{};{}m \x1b[0m", r, g, b);
     println!(
         " #{:06X} :: HyDE-{:<5} :: H:{:.1}° C:{:.1} T:{:.1}",
-        source_argb & 0xFFFFFF, palette, src_hue, src_chroma, src_tone
+        source_argb & 0xFFFFFF, palette, src_h, src_c, src_t
     );
 
     // display generated palette
@@ -468,12 +468,107 @@ fn generate_palette(source_argb: u32, palette: &str) {
 // --------------------------------------------------------------------- / print palette
 
 fn print_palette(colors: Vec<ColorPalette>) {
-    for entry in colors {
+    for entry in &colors {
         let r = ((entry.argb >> 16) & 0xFF) as u8;
         let g = ((entry.argb >>  8) & 0xFF) as u8;
         let b = ( entry.argb        & 0xFF) as u8;
         print!("\x1b[48;2;{};{};{}m \x1b[0m", r, g, b);
         println!(" #{:06X} :: {:<10} :: {}", entry.argb & 0xFFFFFF, entry.group, entry.name);
+    }
+    deploy_palette(&colors);
+}
+
+
+// --------------------------------------------------------------------- / deploy palette
+
+fn deploy_palette(colors: &[ColorPalette]) {
+
+    // eval XDG config dir
+    let xdg_dir = std::env::var("XDG_CONFIG_HOME").ok().or_else(|| {
+        std::env::var("HOME").ok().map(|home| format!("{}/.config", home))
+    }).map(|base| format!("{}/wallbash", base)).unwrap_or_default();
+
+    let templates = match std::fs::read_dir(&xdg_dir) {
+        Ok(templates) => templates,
+        Err(_) => return,
+    };
+
+    let mut deployments = Vec::new();
+    let mut hashpaths = std::collections::HashSet::new();
+
+    // scan template files (*.t2)
+    for entry in templates.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("t2") {
+            continue;
+        }
+        let template = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        // parse header
+        let (out, cmd, content) = if let Some(newline_pos) = template.find('\n') {
+            let header = &template[..newline_pos];
+            if header.starts_with("[::HyDE::]") {
+                let parts: Vec<&str> = header.split('|').collect();
+                let out = parts.get(1).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                let cmd = parts.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                (out, cmd, &template[newline_pos + 1..])
+            } else {
+                continue;
+            }
+        } else {
+            continue;
+        };
+
+        // skip duplicate outputs
+        if let Some(ref dest) = out {
+            if !hashpaths.insert(dest.clone()) {
+                continue;
+            }
+        }
+
+        // inject palette colors
+        let mut rendered = content.to_string();
+        for color in colors {
+            let tag = format!("[::{}::]", color.name);
+            let hex = format!("#{:06X}", color.argb & 0xFFFFFF);
+            rendered = rendered.replace(&tag, &hex);
+        }
+        deployments.push((out, cmd, rendered));
+    }
+
+    // spawn thread for each template
+    let mut handles = Vec::new();
+    for (out, cmd, rendered) in deployments {
+        handles.push(std::thread::spawn(move || {
+
+            // generate shell script
+            let mut script = String::new();
+            if let Some(target) = &out {
+                script.push_str(&format!("if [ -f \"{}\" ]; then\n", target));
+                script.push_str(&format!("cat > \"{}\" << 'EOF'\n", target));
+                script.push_str(&rendered);
+                script.push_str("\nEOF\n");
+                script.push_str(&format!("echo \"[shell] deployed -> {}\"\n", target));
+                if let Some(cmd) = &cmd {
+                    script.push_str(&format!("{}\n", cmd));
+                }
+                script.push_str("else\n");
+                script.push_str(&format!("echo '[shell] skipped (file not found) -> {}'\n", target));
+                script.push_str("fi\n");
+            }
+
+            // execute shell script
+            if !script.is_empty() {
+                let _ = std::process::Command::new("sh").arg("-c").arg(&script).status();
+            }
+        }));
+    }
+
+    for handle in handles {
+        let _ = handle.join();
     }
 }
 
