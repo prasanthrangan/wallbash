@@ -40,6 +40,13 @@ const VC: ViewingConditions = ViewingConditions {
     rgb_d: [1.0215, 0.9863, 0.9339],
 };
 
+type Role = (&'static str, &'static str, f64, f64, f64, f64);
+
+enum ColorFormat {
+    Rgba(f64),
+    Hex(u8),
+}
+
 
 // --------------------------------------------------------------------- / sRGB ⇆ linear
 
@@ -330,10 +337,10 @@ pub fn dcol(img: &DynamicImage, palette: &str) {
         0.2126 * r + 0.7152 * g + 0.0722 * b
     }).sum();
     let avg_l = total_l / (rgb.width() as f64 * rgb.height() as f64) * 100.0;
-    let palette: String = match palette {
-        "dark"  => "dark".into(),
-        "light" => "light".into(),
-        _       => if avg_l < 50.0 { "dark".into() } else { "light".into() },
+    let palette: &str = match palette {
+        "dark"  => "dark",
+        "light" => "light",
+        _       => if avg_l < 50.0 { "dark" } else { "light" },
     };
 
     // convert sRGB pixels to CIELab
@@ -413,7 +420,6 @@ fn generate_palette(source_argb: u32, palette: &str) {
     let err_c = 84.0;
 
     // group, name, hue, chroma, dark_tone, light_tone
-    type Role = (&'static str, &'static str, f64, f64, f64, f64);
     let roles: &[Role] = &[
         ("Primary",   "Primary",                src_h, pri_c, 80.0,  40.0),
         ("Primary",   "On Primary",             src_h, pri_c, 20.0, 100.0),
@@ -479,6 +485,40 @@ fn print_palette(colors: Vec<ColorPalette>) {
 }
 
 
+// --------------------------------------------------------------------- / deployment helpers
+
+fn parse_alpha(s: &str) -> Option<ColorFormat> {
+    if s.is_empty() { return None  }
+    if s.contains('.') {
+        let val = s.parse::<f64>().ok()?;
+        Some(ColorFormat::Rgba(val.clamp(0.0, 1.0)))
+    } else {
+        let val = u8::from_str_radix(s, 16).ok()?;
+        Some(ColorFormat::Hex(val))
+    }
+}
+
+fn scan_templates(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("t2") {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+
 // --------------------------------------------------------------------- / deploy palette
 
 fn deploy_palette(colors: &[ColorPalette]) {
@@ -487,21 +527,12 @@ fn deploy_palette(colors: &[ColorPalette]) {
     let xdg_dir = std::env::var("XDG_CONFIG_HOME").ok().or_else(|| {
         std::env::var("HOME").ok().map(|home| format!("{}/.config", home))
     }).map(|base| format!("{}/wallbash", base)).unwrap_or_default();
-
-    let templates = match std::fs::read_dir(&xdg_dir) {
-        Ok(templates) => templates,
-        Err(_) => return,
-    };
-
+    let templates = scan_templates(std::path::Path::new(&xdg_dir));
     let mut deployments = Vec::new();
     let mut hashpaths = std::collections::HashSet::new();
 
     // scan template files (*.t2)
-    for entry in templates.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("t2") {
-            continue;
-        }
+    for path in templates {
         let template = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(_) => continue,
@@ -529,12 +560,32 @@ fn deploy_palette(colors: &[ColorPalette]) {
             }
         }
 
-        // inject palette colors
+        // loop to parse tags [::role::alpha::]
         let mut rendered = content.to_string();
-        for color in colors {
-            let tag = format!("[::{}::]", color.name);
-            let hex = format!("#{:06X}", color.argb & 0xFFFFFF);
-            rendered = rendered.replace(&tag, &hex);
+        loop {
+            let Some(start) = rendered.find("[::") else { break };
+            let tag = &rendered[start + 3..];
+            let Some(end) = tag.find("::]") else { break };
+            let inner = &tag[..end];
+            let tag_len = 3 + inner.len() + 3;
+            let mut parts = inner.split("::");
+            let role = parts.next().unwrap_or("");
+            let alpha_str = parts.next().unwrap_or("");
+
+            // inject rgba values in required format
+            if let Some(entry) = colors.iter().find(|e| e.name == role) {
+                let r = (entry.argb >> 16) & 0xFF;
+                let g = (entry.argb >>  8) & 0xFF;
+                let b =  entry.argb        & 0xFF;
+                let replacement = match parse_alpha(alpha_str) {
+                    Some(ColorFormat::Rgba(a)) => format!("rgba({},{},{},{:.2})", r, g, b, a),
+                    Some(ColorFormat::Hex(a)) => format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a),
+                    None => format!("#{:02X}{:02X}{:02X}", r, g, b),
+                };
+                rendered.replace_range(start..start + tag_len, &replacement);
+            } else {
+                rendered.replace_range(start..start + tag_len, "");
+            }
         }
         deployments.push((out, cmd, rendered));
     }
@@ -551,10 +602,10 @@ fn deploy_palette(colors: &[ColorPalette]) {
                 script.push_str(&format!("cat > \"{}\" << 'EOF'\n", target));
                 script.push_str(&rendered);
                 script.push_str("\nEOF\n");
-                script.push_str(&format!("echo \"[shell] deployed -> {}\"\n", target));
                 if let Some(cmd) = &cmd {
                     script.push_str(&format!("{}\n", cmd));
                 }
+                script.push_str(&format!("echo \"[shell] deployed -> {}\"\n", target));
                 script.push_str("else\n");
                 script.push_str(&format!("echo '[shell] skipped (file not found) -> {}'\n", target));
                 script.push_str("fi\n");
