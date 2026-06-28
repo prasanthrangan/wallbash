@@ -410,12 +410,13 @@ fn generate_palette(source_argb: u32, palette: &str) {
     let (src_h, src_c, src_t) = argb_to_hct(source_argb, &VC);
 
     // material palette specs
-    let pri_c = src_c.max(48.0);
-    let sec_c = 16.0;
+    let pri_c = src_c;
+    let (sec_c, ter_c, neu_c, nev_c) = if src_c < 3.0 {
+        (0.0, 0.0, 0.0, 0.0)
+    } else {
+        (src_c * 0.5, src_c * 0.7, 4.0, 8.0)
+    };
     let ter_h = (src_h + 60.0).rem_euclid(360.0);
-    let ter_c = 24.0;
-    let neu_c = 4.0;
-    let nev_c = 8.0;
     let err_h = 25.0;
     let err_c = 84.0;
 
@@ -465,6 +466,7 @@ fn generate_palette(source_argb: u32, palette: &str) {
     let mut colors = Vec::with_capacity(roles.len());
     for &(group, name, hue, chroma, dark_tone, light_tone) in roles {
         let tone = if palette == "dark" { dark_tone } else { light_tone };
+        let chroma = if palette == "dark" && group == "Surface" && tone <= 10.0 { chroma.min(2.5) } else { chroma };
         colors.push(ColorPalette { group, name, argb: hct_to_argb(hue, chroma, tone, &VC) });
     }
     print_palette(colors);
