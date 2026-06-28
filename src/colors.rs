@@ -518,6 +518,21 @@ fn scan_templates(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     out
 }
 
+fn eval_shell(input: &str) -> Option<String> {
+    let output = std::process::Command::new("sh")
+        .arg("-c").arg(format!("echo \"{}\"", input))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output().ok()?;
+
+    if output.status.success() {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    } else {
+        None
+    }
+}
+
 
 // --------------------------------------------------------------------- / deploy palette
 
@@ -595,25 +610,32 @@ fn deploy_palette(colors: &[ColorPalette]) {
     for (out, cmd, rendered) in deployments {
         handles.push(std::thread::spawn(move || {
 
-            // generate shell script
-            let mut script = String::new();
-            if let Some(target) = &out {
-                script.push_str(&format!("if [ -f \"{}\" ]; then\n", target));
-                script.push_str(&format!("cat > \"{}\" << 'EOF'\n", target));
-                script.push_str(&rendered);
-                script.push_str("\nEOF\n");
-                if let Some(cmd) = &cmd {
-                    script.push_str(&format!("{}\n", cmd));
-                }
-                script.push_str(&format!("echo \"[shell] deployed -> {}\"\n", target));
-                script.push_str("else\n");
-                script.push_str(&format!("echo '[shell] skipped (file not found) -> {}'\n", target));
-                script.push_str("fi\n");
+            // resolve target file
+            let resolved_path = out.as_deref().and_then(|p| eval_shell(p));
+            if resolved_path.is_none() {
+                eprintln!("[shell] failed to resolve {:?}", out);
+                return;
             }
+            let target = resolved_path.unwrap();
 
-            // execute shell script
-            if !script.is_empty() {
-                let _ = std::process::Command::new("sh").arg("-c").arg(&script).status();
+            // write the rendered theme
+            if !std::path::Path::new(&target).exists() {
+                eprintln!("[shell] skipped (file not found) -> {}", target);
+                return;
+            }
+            if let Err(e) = std::fs::write(&target, &rendered) {
+                eprintln!("[shell] failed to write {} {}", target, e);
+                return;
+            }
+            println!("[shell] deployed -> {}", target);
+
+            // execute post deployment command
+            if let Some(post_cmd) = &cmd {
+                if let Some(resolved_cmd) = eval_shell(post_cmd) {
+                    let _ = std::process::Command::new("sh").arg("-c").arg(&resolved_cmd).status();
+                } else {
+                    eprintln!("[shell] failed to resolve {}", post_cmd);
+                }
             }
         }));
     }
