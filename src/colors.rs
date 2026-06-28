@@ -411,7 +411,7 @@ fn generate_palette(source_argb: u32, palette: &str) {
 
     // material palette specs
     let pri_c = src_c;
-    let (sec_c, ter_c, neu_c, nev_c) = if src_c < 5.0 {
+    let (sec_c, ter_c, neu_c, nev_c) = if src_c < 3.0 {
         (0.0, 0.0, 0.0, 0.0)
     } else {
         (src_c * 0.5, src_c * 0.7, 4.0, 8.0)
