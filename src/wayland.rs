@@ -61,12 +61,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                 "wl_compositor" => {
                     let compositor = registry.bind::<wl_compositor::WlCompositor, _, _>(name, version, qh, ());
                     state.compositor = Some(compositor);
-                    println!("[w{}] ✓ {} (v{})", name, interface, version);
+                    println!("[w{}] {} (v{})", name, interface, version);
                 }
                 "zwlr_layer_shell_v1" => {
                     let layer_shell = registry.bind::<zwlr_layer_shell_v1::ZwlrLayerShellV1, _, _>(name, version, qh, ());
                     state.layer_shell = Some(layer_shell);
-                    println!("[w{}] ✓ {} (v{})", name, interface, version);
+                    println!("[w{}] {} (v{})", name, interface, version);
                 }
                 "wl_output" => {
                     let index = state.monitors.len();
@@ -79,9 +79,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                         refresh: 0,
                         detected: false,
                     });
-                    println!("[w{}] ✓ {} (v{})", name, interface, version);
+                    println!("[w{}] {} (v{})", name, interface, version);
                 }
-                _ => println!("[w{}] {} (v{})", name, interface, version)
+                _ => {}
             }
         }
     }
