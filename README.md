@@ -10,11 +10,11 @@ Use `wallbash` as a core component of your Wayland desktop environment — set w
 
 ## Features
 
-- GPU acceleration powered by `vulkan` for smooth, high‑performance rendering
-- Dynamic color palette generation based on Material Design with `auto`, `dark`, and `light` modes
-- Built for Wayland, using the `layer-shell` protocol for seamless integration
-- Scale the image to your liking using `cover`, `fit`, or `original` modes
-- Precise anchor point positioning from `1` to `9` for fine‑tuned wallpaper placement
+- GPU acceleration powered by Vulkan for smooth, high‑performance rendering
+- Built for seamless integration with your Wayland compositor
+- Dynamic color palette generation based on Material Design with <kbd>auto</kbd>, <kbd>dark</kbd>, and <kbd>light</kbd> modes
+- Scale the image to your liking using <kbd>cover</kbd>, <kbd>fit</kbd>, or <kbd>original</kbd> modes
+- Precise anchor point positioning from <kbd>1</kbd> to <kbd>9</kbd> for fine‑tuned wallpaper placement
 - Automatic background blur fill for mismatched aspect ratios, eliminating black bars
 - Fluid transitions and animations*
 - Multi-monitor support*
@@ -52,20 +52,20 @@ wallbash set [option] <value>
 
 Wallbash is a **single binary** that can run in two modes:
 
-- **Client Mode:** Run `wallbash set --wall ...` to set a wallpaper. The command either:
+- **Client Mode:** Run <kbd>wallbash set --wall ...</kbd> to set a wallpaper. The command either:
   - Connects to an existing daemon and sends the command, or
   - Starts the daemon automatically if it's not already running, then sends the command.
 
-- **Daemon Mode:** Run `wallbash start` to explicitly launch the daemon, or let it be started automatically on first use. The daemon:
+- **Daemon Mode:** Run <kbd>wallbash start</kbd> to explicitly launch the daemon, or let it be started automatically on first use. The daemon:
   - Manages the Wayland surface and Vulkan rendering pipeline.
-  - Listens for commands via a Unix socket (`/tmp/wallbash.sock`).
-  - Persists in the background until stopped with `wallbash stop`.
+  - Listens for commands via a Unix socket (<kbd>/tmp/wallbash.sock</kbd>).
+  - Persists in the background until stopped with <kbd>wallbash stop</kbd>.
 
 The core **modules** are structured as:
 
 - **main.rs** The CLI entry point. Parses command-line arguments and routes them to the appropriate handler (start, stop, set, status). It also manages the daemon lifecycle and socket communication.
-- **wallbash.rs** The core daemon logic. Manages server, handles incoming commands, and coordinates the rendering pipeline. It acts as the central controller for other modules.
-- **wayland.rs** Handles the Wayland connection. Creates and manages the surface, sets up the output, and handles window events. This is the interface between wallbash and your Wayland compositor.
+- **wallbash.rs** The core daemon logic. Manages IPC server, incoming commands, and coordinates wayland and rendering pipeline. It acts as the central controller for other modules.
+- **wayland.rs** Handles the Wayland connection. Creates and manages the surface, sets up the output, and window events. This is the interface between wallbash and your Wayland compositor.
 - **vulkan.rs** Handles the GPU initialization, texture creation, shader compilation, and draws the wallpaper surface using Vulkan. This provides the image rendering pipeline.
 - **filters.rs** Applies Vulkan compute shaders which currently implements a blur effect for the background. The module is designed to be extensible for additional filters in future.
 - **colors.rs** Extracts the dominant color from the wallpaper using k-means clustering, converts colors and generates a color palette. It's then deployed to your config files based on templates.
