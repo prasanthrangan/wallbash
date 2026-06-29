@@ -59,7 +59,6 @@ Wallbash is a **single binary** that can run in two modes:
 - **Daemon Mode:** Run `wallbash start` to explicitly launch the daemon, or let it be started automatically on first use. The daemon:
   - Manages the Wayland surface and Vulkan rendering pipeline.
   - Listens for commands via a Unix socket (`/tmp/wallbash.sock`).
-  - Handles wallpaper transitions, animations, and multi‑monitor setups.
   - Persists in the background until stopped with `wallbash stop`.
 
 The core **modules** are structured as:
@@ -69,13 +68,13 @@ The core **modules** are structured as:
 - **wayland.rs** Handles the Wayland connection. Creates and manages the surface, sets up the output, and handles window events. This is the interface between wallbash and your Wayland compositor.
 - **vulkan.rs** Handles the GPU initialization, texture creation, shader compilation, and draws the wallpaper surface using Vulkan. This provides the image rendering pipeline.
 - **filters.rs** Applies Vulkan compute shaders which currently implements a blur effect for the background. The module is designed to be extensible for additional filters in future.
-- **colors.rs** Extracts the dominant color from the wallpaper using k-means clustering, converts colors and generates a full Material Design color palette. Its then deployed to your config files using built-in template system.
+- **colors.rs** Extracts the dominant color from the wallpaper using k-means clustering, converts colors and generates a color palette. It's then deployed to your config files based on templates.
 
 
 ## Theming
 
 Wallbash generates a color palette from your wallpaper. You can use these colors to dynamically theme your entire desktop environment.
-For detailed guides, usage, and application specific examples, check out the [wiki](https://github.com/prasanthrangan/wallbash/wiki) *(work in progress)*.
+For detailed guides, usage, and application specific examples, check out the [wiki](https://github.com/prasanthrangan/wallbash/wiki/Theming).
 
 ###### *<div align="right"><sub>// HyDE</sub></div>*
 <p align="center"><img src="https://github.com/prasanthrangan/hyprdots/blob/3c8b0dfb5e7f8e41a67b80463513f10d57cab1a4/Source/assets/Arch.svg" width="100"></p>
