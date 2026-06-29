@@ -412,12 +412,12 @@ fn generate_palette(source_argb: u32, palette: &str) {
     // material palette specs
     let pri_c = src_c;
     let (sec_c, ter_c, neu_c, nev_c) = if src_c < 3.0 {
-        (0.0, 0.0, 0.0, 0.0)
+        (0.0, 0.0, 0.0, 0.0) // switch to grayscale
     } else {
         (src_c * 0.5, src_c * 0.7, 4.0, 8.0)
     };
     let ter_h = (src_h + 60.0).rem_euclid(360.0);
-    let err_h = 25.0;
+    let err_h = 4.0;
     let err_c = 84.0;
 
     // group, name, hue, chroma, dark_tone, light_tone
@@ -446,7 +446,7 @@ fn generate_palette(source_argb: u32, palette: &str) {
         ("Surface",   "On Surface Variant",     src_h, nev_c, 80.0,  30.0),
         ("Surface",   "Outline",                src_h, nev_c, 60.0,  50.0),
         ("Surface",   "Outline Variant",        src_h, nev_c, 30.0,  80.0),
-        ("Surface",   "Shadow",                 src_h, neu_c,  0.0,   0.0),
+        ("Surface",   "Shadow",                 src_h, neu_c,  2.0,   2.0),
         ("Surface",   "Inverse Surface",        src_h, neu_c, 90.0,  20.0),
         ("Surface",   "Inverse On Surface",     src_h, neu_c, 20.0,  95.0),
         ("Surface",   "Inverse Primary",        src_h, pri_c, 80.0,  40.0),
