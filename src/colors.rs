@@ -350,7 +350,7 @@ pub fn dcol(img: &DynamicImage, palette: &str) {
 
     // k-means clustering
     let k = 8usize;
-    let max_iter = 20;
+    let max_iter = 10;
     let mut centroids = Vec::with_capacity(k);
     let mut lcg = 42u32;
     for _ in 0..k {
