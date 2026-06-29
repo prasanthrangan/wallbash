@@ -493,11 +493,15 @@ fn parse_alpha(s: &str) -> Option<ColorFormat> {
     if s.is_empty() { return None  }
     if s.contains('.') {
         let val = s.parse::<f64>().ok()?;
-        Some(ColorFormat::Rgba(val.clamp(0.0, 1.0)))
-    } else {
-        let val = u8::from_str_radix(s, 16).ok()?;
-        Some(ColorFormat::Hex(val))
+        return Some(ColorFormat::Rgba(val.clamp(0.0, 1.0)));
     }
+    if let Ok(pct) = s.parse::<u8>() {
+        if (1..=100).contains(&pct) {
+            let val = ((pct as f64 / 100.0) * 255.0).round() as u8;
+            return Some(ColorFormat::Hex(val));
+        }
+    }
+    None
 }
 
 fn scan_templates(root: &std::path::Path) -> Vec<std::path::PathBuf> {
