@@ -18,13 +18,14 @@ use std::{
     process::Command,
     thread::sleep,
     time::Duration,
+    path::PathBuf,
 };
 
 const SOCKET_PATH: &str = "/tmp/wallbash.sock";
 const LOG_FILE: &str = "/tmp/wallbash.log";
 
 
-// --------------------------------------------------------------------- / funtions
+// --------------------------------------------------------------------- / sock
 
 fn print_usage() {
     eprintln!(r"
@@ -36,10 +37,11 @@ fn print_usage() {
 
     ::Options
         wallbash set [option] <value>
-            -p, --palette <color>       | Generate color palette (auto, dark, light)
-            -m, --mode <scale>          | Scaling mode (cover, fit, original)
-            -a, --anchor <1-9>          | Anchor point (1=top-left ... 9=bottom-right)
-            -w, --wall <file>           | Wallpaper file /path/to/file.img
+            -p, --palette <color>       |  Generate color palette (auto, dark, light)
+            -c, --cycle <signed int>    |  Cycle in current folder (+1, -2, etc.)
+            -m, --mode <scale>          |  Scaling mode (cover, fit, original)
+            -a, --anchor <1-9>          |  Anchor point (1=top-left ... 9=bottom-right)
+            -w, --wall <file>           |  Wallpaper file /path/to/file.img
 "   );
 }
 
@@ -63,10 +65,13 @@ fn wait_loop() -> Result<(), Box<dyn std::error::Error>> {
     Err("Waiting for daemon...".into())
 }
 
-fn parse_args(args: &[String]) -> (String, String, f32, f32, String) {
 
-    // wallpaper – mandatory
-    let wall = args.iter().position(|a| a == "--wall" || a == "-w")
+// --------------------------------------------------------------------- / args
+
+fn parse_args(args: &[String]) -> (String, i32, String, f32, f32) {
+
+    // wallpaper – default "cached"
+    args.iter().position(|a| a == "--wall" || a == "-w")
         .and_then(|i| args.get(i + 1).cloned())
         .or_else(|| {
             args.iter().skip(2).scan(false, |skip, a| {
@@ -79,14 +84,10 @@ fn parse_args(args: &[String]) -> (String, String, f32, f32, String) {
                 } else {
                     Some(Some(a.clone()))
                 }
-            })
-            .flatten().last()
-        })
-        .unwrap_or_else(|| {
-            eprintln!("Missing wallpaper (use --wall <path> or bare path)");
-            print_usage();
-            std::process::exit(1);
-        });
+            }).flatten().last()
+        }).map(|p| {
+            save_cache(&p);
+        }).unwrap_or_default();
 
     // color generation - default "skip" 
     let palette = args.iter().position(|a| a == "--palette" || a == "-p")
@@ -94,6 +95,12 @@ fn parse_args(args: &[String]) -> (String, String, f32, f32, String) {
         .filter(|s| matches!(s.as_str(), "auto" | "dark" | "light"))
         .map(|s| s.clone())
         .unwrap_or_else(|| "skip".into());
+
+    // wallpaper cycle – default "0"
+    let cycle: i32 = args.iter().position(|a| a == "--cycle" || a == "-c")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(0);
 
     // mode – default "cover"
     let mode = args.iter().position(|a| a == "--mode" || a == "-m")
@@ -121,7 +128,79 @@ fn parse_args(args: &[String]) -> (String, String, f32, f32, String) {
         _ => (0.5, 0.5),
     };
 
-    (wall, mode, ax, ay, palette)
+    (palette, cycle, mode, ax, ay)
+}
+
+
+// --------------------------------------------------------------------- / cache
+
+fn cache_file() -> PathBuf {
+    let cache = env::var("XDG_CACHE_HOME").ok().or_else(|| env::var("HOME")
+        .ok().map(|home| format!("{}/.cache", home))).unwrap_or_default();
+    PathBuf::from(cache).join("wallbash/state")
+}
+
+fn save_cache(path: &str) {
+    let resolved = std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string());
+    if let Some(parent) = cache_file().parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(cache_file(), &resolved);
+}
+
+fn load_cache() -> Option<String> {
+    std::fs::read_to_string(cache_file()).ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+
+// --------------------------------------------------------------------- / cycle
+
+fn scan_images(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).map(|e| e.path())
+            .filter(|p| {
+                p.extension().and_then(|e| e.to_str())
+                .map(|ext| matches!(ext.to_lowercase().as_str(), "jpg"|"jpeg"|"png"|"bmp"|"gif"|"webp"))
+                .unwrap_or(false)
+            }).collect(),
+        Err(_) => return vec![],
+    };
+    files.sort();
+    files
+}
+
+fn cycle_wallpaper(cycle: i32) -> String {
+
+    // read cached image
+    let current = load_cache().unwrap_or_else(|| {
+        eprintln!("Cached wallpaper not found");
+        std::process::exit(1);
+    });
+
+    // resolve parent dir
+    let dir = std::path::Path::new(&current).parent().unwrap_or_else(|| {
+        eprintln!("Cached directory not found");
+        std::process::exit(1);
+    });
+
+    // scan parent dir
+    let images = scan_images(dir);
+    if images.is_empty() {
+        eprintln!("No images found in {:?}", dir);
+        std::process::exit(1);
+    }
+
+    // cycle logic
+    let index = images.iter().position(|p| p.to_string_lossy() == current).unwrap_or(0);
+    let count = images.len() as i32;
+    let index = ((index as i32 + cycle) % count + count) % count;
+    let wall = images[index as usize].to_string_lossy().to_string();
+    save_cache(&wall);
+    wall
 }
 
 
@@ -140,7 +219,8 @@ fn main() {
             }
         }
         Some("set") => {
-            let (wall, mode, ax, ay, palette) = parse_args(&args);
+            let (palette, cycle, mode, ax, ay) = parse_args(&args);
+            let wall = cycle_wallpaper(cycle);
             let cmd = format!("set{}\x01{}\x01{}\x01{}\x01{}", palette, mode, ax, ay, wall);
             if !check_daemon() {
                 println!("Starting daemon");
