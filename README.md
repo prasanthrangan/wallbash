@@ -41,11 +41,11 @@ wallbash status                 #  Show daemon status
 
 # options for "set"
 wallbash set [option] <value>
-    -p, --palette <color>       #  Generate color palette (auto, dark, light)
+    -w, --wall <file>           #  Wallpaper file /path/to/file.img
     -c, --cycle <signed int>    #  Cycle in current folder (+1, -2, etc.)
+    -p, --palette <color>       #  Generate color palette (auto, dark, light)
     -m, --mode <scale>          #  Scaling mode (cover, fit, original)
     -a, --anchor <1-9>          #  Anchor point (1=top-left ... 9=bottom-right)
-    -w, --wall <file>           #  Wallpaper file /path/to/file.img
 ```
 
 
