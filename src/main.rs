@@ -21,11 +21,22 @@ use std::{
     path::PathBuf,
 };
 
+
+// --------------------------------------------------------------------- / datatypes
+
+struct CachedState {
+    wall: String,
+    palette: String,
+    mode: String,
+    anchor_x: f32,
+    anchor_y: f32,
+}
+
 const SOCKET_PATH: &str = "/tmp/wallbash.sock";
 const LOG_FILE: &str = "/tmp/wallbash.log";
 
 
-// --------------------------------------------------------------------- / sock
+// --------------------------------------------------------------------- / help
 
 fn print_usage() {
     eprintln!(r"
@@ -44,6 +55,9 @@ fn print_usage() {
             -w, --wall <file>           |  Wallpaper file /path/to/file.img
 "   );
 }
+
+
+// --------------------------------------------------------------------- / sock
 
 fn send_command(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = UnixStream::connect(SOCKET_PATH)?;
@@ -66,72 +80,6 @@ fn wait_loop() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 
-// --------------------------------------------------------------------- / args
-
-fn parse_args(args: &[String]) -> (String, i32, String, f32, f32) {
-
-    // wallpaper – default "cached"
-    args.iter().position(|a| a == "--wall" || a == "-w")
-        .and_then(|i| args.get(i + 1).cloned())
-        .or_else(|| {
-            args.iter().skip(2).scan(false, |skip, a| {
-                if *skip {
-                    *skip = false;
-                    Some(None)
-                } else if a.starts_with('-') {
-                    *skip = true;
-                    Some(None)
-                } else {
-                    Some(Some(a.clone()))
-                }
-            }).flatten().last()
-        }).map(|p| {
-            save_cache(&p);
-        }).unwrap_or_default();
-
-    // color generation - default "skip" 
-    let palette = args.iter().position(|a| a == "--palette" || a == "-p")
-        .and_then(|i| args.get(i + 1))
-        .filter(|s| matches!(s.as_str(), "auto" | "dark" | "light"))
-        .map(|s| s.clone())
-        .unwrap_or_else(|| "skip".into());
-
-    // wallpaper cycle – default "0"
-    let cycle: i32 = args.iter().position(|a| a == "--cycle" || a == "-c")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(0);
-
-    // mode – default "cover"
-    let mode = args.iter().position(|a| a == "--mode" || a == "-m")
-        .and_then(|i| args.get(i + 1))
-        .filter(|s| matches!(s.as_str(), "cover" | "fit" | "original"))
-        .map(|s| s.clone())
-        .unwrap_or_else(|| "cover".into());
-
-    // anchor – default "center"
-    let anchor_num = args.iter().position(|a| a == "--anchor" || a == "-a")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse::<u8>().ok())
-        .filter(|&n| (1..10).contains(&n))
-        .unwrap_or(5);
-    let (ax, ay) = match anchor_num {
-        1 => (0.0, 0.0),
-        2 => (0.5, 0.0),
-        3 => (1.0, 0.0),
-        4 => (0.0, 0.5),
-        5 => (0.5, 0.5),
-        6 => (1.0, 0.5),
-        7 => (0.0, 1.0),
-        8 => (0.5, 1.0),
-        9 => (1.0, 1.0),
-        _ => (0.5, 0.5),
-    };
-
-    (palette, cycle, mode, ax, ay)
-}
-
-
 // --------------------------------------------------------------------- / cache
 
 fn cache_file() -> PathBuf {
@@ -140,20 +88,39 @@ fn cache_file() -> PathBuf {
     PathBuf::from(cache).join("wallbash/state")
 }
 
-fn save_cache(path: &str) {
-    let resolved = std::fs::canonicalize(path)
+fn save_cache(state: &CachedState) {
+    let resolved = std::fs::canonicalize(&state.wall)
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string());
+        .unwrap_or_else(|_| state.wall.clone());
+    let content = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        resolved, state.palette, state.mode, state.anchor_x, state.anchor_y
+    );
     if let Some(parent) = cache_file().parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(cache_file(), &resolved);
+    let _ = std::fs::write(cache_file(), content);
 }
 
-fn load_cache() -> Option<String> {
-    std::fs::read_to_string(cache_file()).ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+fn load_cache() -> CachedState {
+    let default = CachedState {
+        wall: String::new(),
+        palette: "skip".into(),
+        mode: "cover".into(),
+        anchor_x: 0.5,
+        anchor_y: 0.5,
+    };
+    let content = match std::fs::read_to_string(cache_file()) {
+        Ok(c) => c,
+        Err(_) => return default,
+    };
+    let mut lines = content.lines();
+    let wall = lines.next().map(|s| s.to_string()).unwrap_or_else(|| default.wall.clone());
+    let palette = lines.next().map(|s| s.to_string()).unwrap_or_else(|| default.palette.clone());
+    let mode = lines.next().map(|s| s.to_string()).unwrap_or_else(|| default.mode.clone());
+    let anchor_x: f32 = lines.next().and_then(|s| s.parse().ok()).unwrap_or(default.anchor_x);
+    let anchor_y: f32 = lines.next().and_then(|s| s.parse().ok()).unwrap_or(default.anchor_y);
+    CachedState { wall, palette, mode, anchor_x, anchor_y }
 }
 
 
@@ -173,13 +140,7 @@ fn scan_images(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     files
 }
 
-fn cycle_wallpaper(cycle: i32) -> String {
-
-    // read cached image
-    let current = load_cache().unwrap_or_else(|| {
-        eprintln!("Cached wallpaper not found");
-        std::process::exit(1);
-    });
+fn cycle_wallpaper(current: &str, cycle: i32) -> String {
 
     // resolve parent dir
     let dir = std::path::Path::new(&current).parent().unwrap_or_else(|| {
@@ -198,9 +159,98 @@ fn cycle_wallpaper(cycle: i32) -> String {
     let index = images.iter().position(|p| p.to_string_lossy() == current).unwrap_or(0);
     let count = images.len() as i32;
     let index = ((index as i32 + cycle) % count + count) % count;
-    let wall = images[index as usize].to_string_lossy().to_string();
-    save_cache(&wall);
-    wall
+    images[index as usize].to_string_lossy().to_string()
+}
+
+
+// --------------------------------------------------------------------- / args
+
+fn parse_args(args: &[String]) -> CachedState {
+
+    // get previous state
+    let mut state = load_cache();
+
+    // color generation - default "skip" 
+    if let Some(pos) = args.iter().position(|a| a == "--palette" || a == "-p") {
+        let pal = args.get(pos + 1)
+            .filter(|s| matches!(s.as_str(), "auto" | "dark" | "light"))
+            .map(|s| s.clone()).unwrap_or_else(|| "skip".into());
+        state.palette = pal;
+    }
+
+    // mode – default "cover"
+    if let Some(pos) = args.iter().position(|a| a == "--mode" || a == "-m") {
+        let m = args.get(pos + 1)
+            .filter(|s| matches!(s.as_str(), "cover" | "fit" | "original"))
+            .map(|s| s.clone()).unwrap_or_else(|| "cover".into());
+        state.mode = m;
+    }
+
+    // anchor – default "center"
+    if let Some(pos) = args.iter().position(|a| a == "--anchor" || a == "-a") {
+        let anchor = args.get(pos + 1)
+            .and_then(|s| s.parse::<u8>().ok())
+            .filter(|&n| (1..10).contains(&n));
+        let (ax, ay) = match anchor {
+            Some(1) => (0.0, 0.0),
+            Some(2) => (0.5, 0.0),
+            Some(3) => (1.0, 0.0),
+            Some(4) => (0.0, 0.5),
+            Some(5) => (0.5, 0.5),
+            Some(6) => (1.0, 0.5),
+            Some(7) => (0.0, 1.0),
+            Some(8) => (0.5, 1.0),
+            Some(9) => (1.0, 1.0),
+            _       => (0.5, 0.5),
+        };
+        state.anchor_x = ax;
+        state.anchor_y = ay;
+    }
+
+    // wallpaper – default "cached"
+    let wall = args.iter().position(|a| a == "--wall" || a == "-w")
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| {
+            args.iter().skip(2).scan(false, |skip, a| {
+                if *skip {
+                    *skip = false;
+                    Some(None)
+                } else if a.starts_with('-') {
+                    *skip = true;
+                    Some(None)
+                } else {
+                    Some(Some(a.clone()))
+                }
+            }).flatten().last()
+        });
+    if let Some(wall) = wall {
+        let resolved = std::fs::canonicalize(&wall)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or(wall);
+        state.wall = resolved;
+    }
+
+    // cycle wallpaper – default "0"
+    let cycle: i32 = args.iter().position(|a| a == "--cycle" || a == "-c")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if cycle != 0 {
+        if state.wall.is_empty() {
+            eprintln!("No cached wallpaper");
+            std::process::exit(1);
+        }
+        state.wall = cycle_wallpaper(&state.wall, cycle);
+    }
+
+    // cache and return state
+    if state.wall.is_empty() {
+        eprintln!("Missing wallpaper (use --wall <path> or bare path)");
+        print_usage();
+        std::process::exit(1);
+    }
+    save_cache(&state);
+    state
 }
 
 
@@ -219,9 +269,9 @@ fn main() {
             }
         }
         Some("set") => {
-            let (palette, cycle, mode, ax, ay) = parse_args(&args);
-            let wall = cycle_wallpaper(cycle);
-            let cmd = format!("set{}\x01{}\x01{}\x01{}\x01{}", palette, mode, ax, ay, wall);
+            let state = parse_args(&args);
+            let cmd = format!("set{}\x01{}\x01{}\x01{}\x01{}",
+                state.palette, state.mode, state.anchor_x, state.anchor_y, state.wall);
             if !check_daemon() {
                 println!("Starting daemon");
                 let log_file = std::fs::File::create(LOG_FILE).expect("Cannot create log");
