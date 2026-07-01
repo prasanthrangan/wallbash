@@ -11,7 +11,6 @@ pub mod wayland;
 pub mod vulkan;
 pub mod filters;
 pub mod colors;
-
 use std::{
     env, io::Write,
     os::unix::net::UnixStream,
@@ -48,11 +47,11 @@ fn print_usage() {
 
     ::Options
         wallbash set [option] <value>
-            -p, --palette <color>       |  Generate color palette (auto, dark, light)
+            -w, --wall <file>           |  Wallpaper file /path/to/file.img
             -c, --cycle <signed int>    |  Cycle in current folder (+1, -2, etc.)
+            -p, --palette <color>       |  Generate color palette (auto, dark, light)
             -m, --mode <scale>          |  Scaling mode (cover, fit, original)
             -a, --anchor <1-9>          |  Anchor point (1=top-left ... 9=bottom-right)
-            -w, --wall <file>           |  Wallpaper file /path/to/file.img
 "   );
 }
 
@@ -170,6 +169,47 @@ fn parse_args(args: &[String]) -> CachedState {
     // get previous state
     let mut state = load_cache();
 
+    // wallpaper – default "cached"
+    let wall = args.iter().position(|a| a == "--wall" || a == "-w")
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| {
+            args.iter().skip(2).scan(false, |skip, a| {
+                if *skip {
+                    *skip = false;
+                    Some(None)
+                } else if a.starts_with('-') {
+                    *skip = true;
+                    Some(None)
+                } else {
+                    Some(Some(a.clone()))
+                }
+            }).flatten().last()
+        });
+    if let Some(wall) = wall {
+        let resolved = std::fs::canonicalize(&wall)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or(wall);
+        state.wall = resolved;
+    }
+
+    // cycle wallpaper – default "0"
+    let cycle: i32 = args.iter().position(|a| a == "--cycle" || a == "-c")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if cycle != 0 {
+        if state.wall.is_empty() {
+            eprintln!("No cached wallpaper");
+            std::process::exit(1);
+        }
+        state.wall = cycle_wallpaper(&state.wall, cycle);
+    }
+    if state.wall.is_empty() {
+        eprintln!("Missing wallpaper (use --wall <path> or bare path)");
+        print_usage();
+        std::process::exit(1);
+    }
+
     // color generation - default "skip" 
     if let Some(pos) = args.iter().position(|a| a == "--palette" || a == "-p") {
         let pal = args.get(pos + 1)
@@ -207,48 +247,7 @@ fn parse_args(args: &[String]) -> CachedState {
         state.anchor_y = ay;
     }
 
-    // wallpaper – default "cached"
-    let wall = args.iter().position(|a| a == "--wall" || a == "-w")
-        .and_then(|i| args.get(i + 1).cloned())
-        .or_else(|| {
-            args.iter().skip(2).scan(false, |skip, a| {
-                if *skip {
-                    *skip = false;
-                    Some(None)
-                } else if a.starts_with('-') {
-                    *skip = true;
-                    Some(None)
-                } else {
-                    Some(Some(a.clone()))
-                }
-            }).flatten().last()
-        });
-    if let Some(wall) = wall {
-        let resolved = std::fs::canonicalize(&wall)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or(wall);
-        state.wall = resolved;
-    }
-
-    // cycle wallpaper – default "0"
-    let cycle: i32 = args.iter().position(|a| a == "--cycle" || a == "-c")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    if cycle != 0 {
-        if state.wall.is_empty() {
-            eprintln!("No cached wallpaper");
-            std::process::exit(1);
-        }
-        state.wall = cycle_wallpaper(&state.wall, cycle);
-    }
-
     // cache and return state
-    if state.wall.is_empty() {
-        eprintln!("Missing wallpaper (use --wall <path> or bare path)");
-        print_usage();
-        std::process::exit(1);
-    }
     save_cache(&state);
     state
 }
@@ -274,13 +273,10 @@ fn main() {
                 state.palette, state.mode, state.anchor_x, state.anchor_y, state.wall);
             if !check_daemon() {
                 println!("Starting daemon");
-                let log_file = std::fs::File::create(LOG_FILE).expect("Cannot create log");
+                let log = std::fs::File::create(LOG_FILE).expect("Cannot create log");
                 let mut child = Command::new(env::current_exe().unwrap())
-                    .arg("start")
-                    .stdout(log_file.try_clone().unwrap())
-                    .stderr(log_file)
-                    .spawn()
-                    .expect("Failed to start daemon");
+                    .arg("start").stdout(log.try_clone().unwrap()).stderr(log)
+                    .spawn().expect("Failed to start daemon");
                 if let Err(e) = wait_loop() {
                     eprintln!("Error {}", e);
                     let _ = child.kill();
@@ -293,14 +289,23 @@ fn main() {
         }
         Some("stop") => {
             if let Err(e) = send_command("stop") {
-                eprintln!("Failed to stop daemon {}. Is it running?", e);
+                eprintln!("Failed to stop daemon {}. Is it even running?", e);
             }
         }
         Some("status") => {
             if check_daemon() {
-                println!("Daemon is running.");
+                println!("[wallbash] :: Daemon is running");
             } else {
-                println!("Daemon is not running.");
+                println!("[wallbash] :: Daemon is not running");
+            }
+            let state = load_cache();
+            if state.wall.is_empty() {
+                println!("[wallbash] :: No wallpaper cached yet");
+            } else {
+                println!("Wallpaper  :: {}", state.wall);
+                println!("Palette    :: {}", state.palette);
+                println!("Mode       :: {}", state.mode);
+                println!("Anchor     :: ({:.1}, {:.1})", state.anchor_x, state.anchor_y);
             }
         }
         _ => print_usage()

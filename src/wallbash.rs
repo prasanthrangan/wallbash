@@ -251,7 +251,7 @@ impl DaemonState {
         let resolved = std::fs::canonicalize(&path)
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or(path);
-        println!("[wallbash] loading '{}' ({}|{}|ax:{:?}|ay:{:?})", resolved, palette, mode, anchor_x, anchor_y);
+        println!("[wallbash] loading '{}' ({}|{}|ax:{:.1}|ay:{:.1})", resolved, palette, mode, anchor_x, anchor_y);
 
         let effect = |tex: &vulkan::VulkanTexture| {
             if mode != "cover" {
