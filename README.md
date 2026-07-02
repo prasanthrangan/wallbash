@@ -16,9 +16,16 @@ Use `wallbash` as a core component of your Wayland desktop environment — set w
 - Scale the image to your liking using <kbd>cover</kbd>, <kbd>fit</kbd>, or <kbd>original</kbd> modes
 - Precise anchor point positioning from <kbd>1</kbd> to <kbd>9</kbd> for fine‑tuned wallpaper placement
 - Automatic background blur fill for mismatched aspect ratios, eliminating black bars
+- Persistent settings cache to save your setup between sessions
 - Fluid transitions and animations*
-- Multi-monitor support*
 <div align="right"><body>*work in progress</body></div>
+
+
+## Requirements
+
+- **Wayland compositor** that supports <kbd>layer-shell</kbd> protocol
+- **GPU** with <kbd>vulkan</kbd> drivers installed
+- **Rust & Cargo** required to build from source
 
 
 ## Build
@@ -34,7 +41,6 @@ sudo cp target/release/wallbash /usr/local/bin/
 ## Usage
 
 ```bash
-wallbash start                  #  Start the wallpaper daemon
 wallbash set /path/to/file.img  #  Set wallpaper (auto start daemon)
 wallbash stop                   #  Stop the daemon
 wallbash status                 #  Show daemon status
@@ -51,16 +57,7 @@ wallbash set [option] <value>
 
 ## Architecture
 
-Wallbash is a **single binary** that can run in two modes:
-
-- **Client Mode:** Run <kbd>wallbash set --wall ...</kbd> to set a wallpaper. The command either:
-  - Connects to an existing daemon and sends the command, or
-  - Starts the daemon automatically if it's not already running, then sends the command.
-
-- **Daemon Mode:** Run <kbd>wallbash start</kbd> to explicitly launch the daemon, or let it be started automatically on first use. The daemon:
-  - Manages the Wayland surface and Vulkan rendering pipeline.
-  - Listens for commands via a Unix socket (<kbd>/tmp/wallbash.sock</kbd>).
-  - Persists in the background until stopped with <kbd>wallbash stop</kbd>.
+Wallbash is a single binary that runs a background daemon and processes client requests via a Unix socket <kbd>/tmp/wallbash.sock</kbd>.
 
 The core **modules** are structured as:
 
@@ -79,3 +76,4 @@ For detailed guides, usage, and application specific examples, check out the [wi
 
 ###### *<div align="right"><sub>// HyDE</sub></div>*
 <p align="center"><img src="https://github.com/prasanthrangan/hyprdots/blob/3c8b0dfb5e7f8e41a67b80463513f10d57cab1a4/Source/assets/Arch.svg" width="100"></p>
+
