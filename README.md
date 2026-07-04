@@ -7,7 +7,7 @@ A fast and minimal wallpaper engine for HyDE
 
 Use `wallbash` as a core component of your Wayland desktop environment — set wallpapers, generate color palettes, and apply dynamic themes to your desktop.
 
-[![youtube showcase](https://img.youtube.com/vi/UghLTv19yP8/maxresdefault.jpg)](https://youtu.be/UghLTv19yP8)
+https://github.com/user-attachments/assets/d1840f86-6641-4937-92c7-d1d82f3cb0e1
 
 
 ## Features
