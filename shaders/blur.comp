@@ -4,19 +4,19 @@ layout(local_size_x = 16, local_size_y = 16) in;
 layout(set = 0, binding = 0) uniform sampler2D inputTex;
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D outputTex;
 
+layout(push_constant) uniform PC { int horizontal; } pc;
+
 void main() {
     ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
     vec2 size = vec2(imageSize(outputTex));
     vec2 texelSize = 1.0 / size;
     vec4 color = vec4(0.0);
-    int count = 0;
-    for (int dx = -7; dx <= 7; dx++) {
-        for (int dy = -7; dy <= 7; dy++) {
-            vec2 offset = vec2(float(dx), float(dy)) * texelSize;
-            color += texture(inputTex, (vec2(gid) + 0.5) / size + offset);
-            count++;
-        }
+    for (int i = -7; i <= 7; i++) {
+        vec2 offset = pc.horizontal == 1
+            ? vec2(float(i), 0.0) * texelSize
+            : vec2(0.0, float(i)) * texelSize;
+        color += texture(inputTex, (vec2(gid) + 0.5) / size + offset);
     }
-    color /= float(count);
+    color /= 15.0;
     imageStore(outputTex, gid, color);
 }

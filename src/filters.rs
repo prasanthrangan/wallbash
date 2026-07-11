@@ -52,22 +52,24 @@ pub fn compute_pipeline(
     device: &ash::Device,
     spv: &[u32],
     bindings: &[vk::DescriptorSetLayoutBinding],
+    push_constant_size: u32,   // NEW
 ) -> Result<(vk::ShaderModule, vk::Pipeline, vk::DescriptorSetLayout), Box<dyn Error>> {
-
-    // shader module
     let create_info = vk::ShaderModuleCreateInfo::default().code(spv);
     let module = unsafe { device.create_shader_module(&create_info, None)? };
-
-    // descriptor set layout
     let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(bindings);
     let desc_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
-
-    // pipeline layout
     let set_layouts = [desc_layout];
-    let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+    let push_range = vk::PushConstantRange {
+        stage_flags: vk::ShaderStageFlags::COMPUTE,
+        offset: 0,
+        size: push_constant_size,
+    };
+    let push_ranges = [push_range];
+    let mut pipeline_layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+    if push_constant_size > 0 {
+        pipeline_layout_info = pipeline_layout_info.push_constant_ranges(&push_ranges);
+    }
     let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
-
-    // compute pipeline
     let stage = vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::COMPUTE)
         .module(module)
@@ -79,7 +81,6 @@ pub fn compute_pipeline(
         device.create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
     }.expect("Failed to create compute pipeline");
     let pipeline = pipelines[0];
-
     unsafe { device.destroy_pipeline_layout(pipeline_layout, None) };
     Ok((module, pipeline, desc_layout))
 }
@@ -111,7 +112,7 @@ pub fn filter_pipeline(
                     .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::COMPUTE),
             ];
-            compute_pipeline(device, &blur_words, &bindings)
+            compute_pipeline(device, &blur_words, &bindings, 4)
         }
         _ => Err(format!("unknown filter: {}", filter).into()),
     }
@@ -122,12 +123,13 @@ pub fn filter_pipeline(
 
 pub unsafe fn compute_filter(
     vk_core: &VulkanCore,
-    _input_image: vk::Image,
     output_image: vk::Image,
     width: u32,
     height: u32,
     pipeline: vk::Pipeline,
     descriptor_set_layout: vk::DescriptorSetLayout,
+    push_constants: &[u8],
+    dst_stage: vk::PipelineStageFlags,
     configure: impl FnOnce(vk::DescriptorSet),
 ) -> Result<(), Box<dyn Error>> {
     let pool_sizes = [
@@ -141,12 +143,20 @@ pub unsafe fn compute_filter(
     let alloc_info = vk::DescriptorSetAllocateInfo::default()
         .descriptor_pool(desc_pool)
         .set_layouts(&set_layouts);
-    let desc_sets = unsafe { vk_core.device.allocate_descriptor_sets(&alloc_info)? };
-    let desc_set = desc_sets[0];
+    let desc_set = unsafe { vk_core.device.allocate_descriptor_sets(&alloc_info)? }[0];
 
     configure(desc_set);
 
-    let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+    let push_range = vk::PushConstantRange {
+        stage_flags: vk::ShaderStageFlags::COMPUTE,
+        offset: 0,
+        size: push_constants.len() as u32,
+    };
+    let push_ranges = [push_range];
+    let mut pipeline_layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+    if !push_constants.is_empty() {
+        pipeline_layout_info = pipeline_layout_info.push_constant_ranges(&push_ranges);
+    }
     let pipeline_layout = unsafe { vk_core.device.create_pipeline_layout(&pipeline_layout_info, None)? };
 
     vk_core.record_commands(|command_buffer| {
@@ -179,6 +189,15 @@ pub unsafe fn compute_filter(
                 pipeline_layout,
                 0, &[desc_set], &[],
             );
+            if !push_constants.is_empty() {
+                vk_core.device.cmd_push_constants(
+                    command_buffer,
+                    pipeline_layout,
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    push_constants,
+                );
+            }
         }
 
         let group_x = (width + 15) / 16;
@@ -200,7 +219,7 @@ pub unsafe fn compute_filter(
             vk_core.device.cmd_pipeline_barrier(
                 command_buffer,
                 vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                dst_stage,
                 vk::DependencyFlags::empty(),
                 &[], &[], &[barrier2],
             );
@@ -226,28 +245,71 @@ pub fn blur_texture(
     blur_pipeline: vk::Pipeline,
     blur_desc_layout: vk::DescriptorSetLayout,
 ) -> Result<VulkanTexture, Box<dyn Error>> {
+
     let (output_image, output_memory) = vk_core.create_texture(
         width, height,
         vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::STORAGE,
         vk::Format::R8G8B8A8_UNORM,
     )?;
 
+    let (mid_image, mid_memory) = vk_core.create_texture(
+        width, height,
+        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
+        vk::Format::R8G8B8A8_UNORM,
+    )?;
+
     let input_view = image_view(&vk_core.device, input_texture.image, vk::Format::R8G8B8A8_SRGB)?;
+    let mid_view = image_view(&vk_core.device, mid_image, vk::Format::R8G8B8A8_UNORM)?;
     let output_view = image_view(&vk_core.device, output_image, vk::Format::R8G8B8A8_UNORM)?;
     let sampler = linear_sampler(&vk_core.device)?;
 
     unsafe {
         compute_filter(
             vk_core,
-            input_texture.image,
-            output_image,
+            mid_image,
             width, height,
             blur_pipeline,
             blur_desc_layout,
+            &1i32.to_ne_bytes(),
+            vk::PipelineStageFlags::COMPUTE_SHADER,
             |desc_set| {
                 let input_info = vk::DescriptorImageInfo::default()
                     .sampler(sampler)
                     .image_view(input_view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                let output_info = vk::DescriptorImageInfo::default()
+                    .image_view(mid_view)
+                    .image_layout(vk::ImageLayout::GENERAL);
+                let input_infos = [input_info];
+                let output_infos = [output_info];
+                let writes = [
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(desc_set).dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&input_infos),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(desc_set).dst_binding(1)
+                        .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                        .image_info(&output_infos),
+                ];
+                vk_core.device.update_descriptor_sets(&writes, &[]);
+            },
+        )?;
+    }
+
+    unsafe {
+        compute_filter(
+            vk_core,
+            output_image,
+            width, height,
+            blur_pipeline,
+            blur_desc_layout,
+            &0i32.to_ne_bytes(),
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            |desc_set| {
+                let input_info = vk::DescriptorImageInfo::default()
+                    .sampler(sampler)
+                    .image_view(mid_view)
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
                 let output_info = vk::DescriptorImageInfo::default()
                     .image_view(output_view)
@@ -256,13 +318,11 @@ pub fn blur_texture(
                 let output_infos = [output_info];
                 let writes = [
                     vk::WriteDescriptorSet::default()
-                        .dst_set(desc_set)
-                        .dst_binding(0)
+                        .dst_set(desc_set).dst_binding(0)
                         .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                         .image_info(&input_infos),
                     vk::WriteDescriptorSet::default()
-                        .dst_set(desc_set)
-                        .dst_binding(1)
+                        .dst_set(desc_set).dst_binding(1)
                         .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                         .image_info(&output_infos),
                 ];
@@ -273,8 +333,11 @@ pub fn blur_texture(
 
     unsafe {
         vk_core.device.destroy_image_view(input_view, None);
+        vk_core.device.destroy_image_view(mid_view, None);
         vk_core.device.destroy_image_view(output_view, None);
         vk_core.device.destroy_sampler(sampler, None);
+        vk_core.device.destroy_image(mid_image, None);
+        vk_core.device.free_memory(mid_memory, None);
     }
 
     Ok(VulkanTexture { image: output_image, _memory: output_memory, width, height })

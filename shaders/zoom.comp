@@ -1,0 +1,115 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform sampler2D img_old;
+layout(set = 0, binding = 1) uniform sampler2D img_new;
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D output_img;
+
+layout(push_constant) uniform PushConstants {
+    float t;          // eased progress 0..1
+    float max_zoom;   // e.g. 0.2 = 20% zoom
+    float old_w;      // old wallpaper width
+    float old_h;      // old wallpaper height
+    float new_w;      // new wallpaper width
+    float new_h;      // new wallpaper height
+    float dst_w;      // screen width
+    float dst_h;      // screen height
+    int   mode;       // 0=cover, 1=fit, 2=original
+    float anchor_x;   // 0..1
+    float anchor_y;   // 0..1
+} pc;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size  = imageSize(output_img);
+    if (coord.x >= size.x || coord.y >= size.y) return;
+
+    float img_w, img_h;
+    bool use_old = (pc.t <= 0.5);
+    if (use_old) {
+        img_w = pc.old_w;
+        img_h = pc.old_h;
+    } else {
+        img_w = pc.new_w;
+        img_h = pc.new_h;
+    }
+
+    float img_aspect = img_w / img_h;
+    float scr_aspect = pc.dst_w / pc.dst_h;
+
+    vec2 src;
+    bool visible = true;
+
+    if (pc.mode == 1) {
+        float scale = min(pc.dst_w / img_w, pc.dst_h / img_h);
+        vec2  sw    = vec2(img_w, img_h) * scale;
+        vec2  off   = (vec2(pc.dst_w, pc.dst_h) - sw) * vec2(pc.anchor_x, pc.anchor_y);
+        vec2  img_coord = vec2(coord) - off;
+        if (img_coord.x >= 0.0 && img_coord.x < sw.x && img_coord.y >= 0.0 && img_coord.y < sw.y) {
+            src = img_coord / scale;
+        } else {
+            visible = false;
+        }
+    } else if (pc.mode == 2) {
+        if (img_w <= pc.dst_w && img_h <= pc.dst_h) {
+            vec2 off = (vec2(pc.dst_w, pc.dst_h) - vec2(img_w, img_h))
+                       * vec2(pc.anchor_x, pc.anchor_y);
+            vec2 img_coord = vec2(coord) - off;
+            if (img_coord.x >= 0.0 && img_coord.x < img_w && img_coord.y >= 0.0 && img_coord.y < img_h) {
+                src = img_coord;
+            } else {
+                visible = false;
+            }
+        } else {
+            if (img_aspect > scr_aspect) {
+                float u_range = scr_aspect / img_aspect;
+                float u_min   = (1.0 - u_range) * pc.anchor_x;
+                src.x = (u_min + u_range * (coord.x / pc.dst_w)) * img_w;
+                src.y = coord.y / pc.dst_h * img_h;
+            } else {
+                float v_range = img_aspect / scr_aspect;
+                float v_min   = (1.0 - v_range) * pc.anchor_y;
+                src.x = coord.x / pc.dst_w * img_w;
+                src.y = (v_min + v_range * (coord.y / pc.dst_h)) * img_h;
+            }
+        }
+    } else {
+        if (img_aspect > scr_aspect) {
+            float u_range = scr_aspect / img_aspect;
+            float u_min   = (1.0 - u_range) * pc.anchor_x;
+            src.x = (u_min + u_range * (coord.x / pc.dst_w)) * img_w;
+            src.y = coord.y / pc.dst_h * img_h;
+        } else {
+            float v_range = img_aspect / scr_aspect;
+            float v_min   = (1.0 - v_range) * pc.anchor_y;
+            src.x = coord.x / pc.dst_w * img_w;
+            src.y = (v_min + v_range * (coord.y / pc.dst_h)) * img_h;
+        }
+    }
+
+    vec4 color = vec4(0.0, 0.0, 0.0, 1.0);
+    if (visible) {
+        float zoom_scale;
+        if (use_old) {
+            float local_t = pc.t * 2.0;
+            zoom_scale = 1.0 + pc.max_zoom * local_t;
+        } else {
+            float local_t = (pc.t - 0.5) * 2.0;
+            zoom_scale = 1.0 + pc.max_zoom * (1.0 - local_t);
+        }
+
+        vec2 center = vec2(img_w, img_h) * 0.5;
+        vec2 sample_coord = center + (src - center) / zoom_scale;
+
+        vec2 uv = sample_coord / vec2(img_w, img_h);
+        if (use_old) {
+            color = texture(img_old, uv);
+        } else {
+            color = texture(img_new, uv);
+        }
+    }
+
+    imageStore(output_img, coord, color);
+}
+
