@@ -6,7 +6,7 @@
 
 // --------------------------------------------------------------------- / imports
 
-use std::ffi::c_void;
+use std::{ffi::c_void,sync::Arc};
 use ash::{
     vk, Entry, khr::{
         wayland_surface, surface, swapchain,
@@ -27,10 +27,12 @@ pub struct VulkanCore {
     pub instance: ash::Instance,
     pub physical_device: vk::PhysicalDevice,
     pub graphics_family_index: u32,
-    pub device: ash::Device,
+    pub device: Arc<ash::Device>,
     pub graphics_queue: vk::Queue,
+    pub swapchain_loader: swapchain::Device,
     pub command_pool: vk::CommandPool,
     pub command_buffer: vk::CommandBuffer,
+    pub submit_fence: vk::Fence,
 }
 
 pub struct VulkanSurfchain {
@@ -118,9 +120,12 @@ pub fn vulkan_core() -> Result<VulkanCore, Box<dyn std::error::Error>> {
     let device_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(std::slice::from_ref(&queue_info))
         .enabled_extension_names(&device_extensions);
-    let device: ash::Device = unsafe { instance.create_device(physical_device, &device_info, None)? };
+    let device = Arc::new(unsafe { instance.create_device(physical_device, &device_info, None)? });
     let graphics_queue = unsafe { device.get_device_queue(graphics_family_index, 0) };
     println!("[v{}] logical device {:?} >> graphics queue {:?}", graphics_family_index, device.handle(), graphics_queue);
+
+    // cache swapchain device
+    let swapchain_loader = swapchain::Device::new(&instance, &device);
 
     // create persistent command pool and buffer
     let command_pool_info = vk::CommandPoolCreateInfo::default()
@@ -135,6 +140,10 @@ pub fn vulkan_core() -> Result<VulkanCore, Box<dyn std::error::Error>> {
     let command_buffer = unsafe { device.allocate_command_buffers(&alloc_info)? }[0];
     println!("[v] command pool {:?} >> command buffer {:?}", command_pool, command_buffer);
 
+    // create fence
+    let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+    let submit_fence = unsafe { device.create_fence(&fence_info, None)? };
+
     Ok(VulkanCore {
         entry,
         instance,
@@ -142,8 +151,10 @@ pub fn vulkan_core() -> Result<VulkanCore, Box<dyn std::error::Error>> {
         graphics_family_index,
         device,
         graphics_queue,
+        swapchain_loader,
         command_pool,
         command_buffer,
+        submit_fence,
     })
 }
 
@@ -151,11 +162,7 @@ pub fn vulkan_core() -> Result<VulkanCore, Box<dyn std::error::Error>> {
 // --------------------------------------------------------------------- / surface swapchain
 
 pub fn vulkan_surfchain(
-    entry: &ash::Entry,
-    instance: &ash::Instance,
-    physical_device: vk::PhysicalDevice,
-    graphics_family_index: u32,
-    device: &ash::Device,
+    vk_core: &VulkanCore,
     disp: &WlDisplay,
     surf: &WlSurface,
     width: u32,
@@ -173,11 +180,11 @@ pub fn vulkan_surfchain(
     };
 
     // check queue family for wayland support
-    let wayland_surface_loader = wayland_surface::Instance::new(entry, instance);
+    let wayland_surface_loader = wayland_surface::Instance::new(&vk_core.entry, &vk_core.instance);
     let supports_present = unsafe {
         wayland_surface_loader.get_physical_device_wayland_presentation_support(
-            physical_device,
-            graphics_family_index,
+            vk_core.physical_device,
+            vk_core.graphics_family_index,
             &mut *wl_display_ptr,
         )};
     if !supports_present {
@@ -192,12 +199,12 @@ pub fn vulkan_surfchain(
     println!("[v] vulkan surface: {:#?} x {:#?} >> {:#?}", disp.id(), surf.id(), surface);
 
     // query surface capabilities and formats
-    let surface_loader = surface::Instance::new(entry, instance);
+    let surface_loader = surface::Instance::new(&vk_core.entry, &vk_core.instance);
     let caps = unsafe {
-        surface_loader.get_physical_device_surface_capabilities(physical_device, surface)?
+        surface_loader.get_physical_device_surface_capabilities(vk_core.physical_device, surface)?
     };
     let formats = unsafe {
-        surface_loader.get_physical_device_surface_formats(physical_device, surface)?
+        surface_loader.get_physical_device_surface_formats(vk_core.physical_device, surface)?
     };
 
     // configure surface
@@ -219,7 +226,6 @@ pub fn vulkan_surfchain(
     println!("[v] surface config: {:?} | {:?}", chosen_format, extent);
 
     // configure swapchain
-    let swapchain_loader = swapchain::Device::new(instance, device);
     let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface)
         .min_image_count(2.max(caps.min_image_count))
@@ -235,8 +241,8 @@ pub fn vulkan_surfchain(
         .clipped(true);
 
     // create the swapchain (ability to present rendering results to a surface)
-    let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None)? };
-    let images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
+    let swapchain = unsafe { vk_core.swapchain_loader.create_swapchain(&swapchain_create_info, None)? };
+    let images = unsafe { vk_core.swapchain_loader.get_swapchain_images(swapchain)? };
     println!("[v{}] swapchain: {}x{}", images.len(), width, height);
 
     Ok(VulkanSurfchain {
@@ -249,16 +255,16 @@ pub fn vulkan_surfchain(
 
 // --------------------------------------------------------------------- / set mode
 
-fn mode_set(
+fn scale_set(
     img_w: u32,
     img_h: u32,
     scr_w: u32,
     scr_h: u32,
     anchor_x: f32,
     anchor_y: f32,
-    mode: &str,
+    scale: &str,
 ) -> (u32, u32, u32, u32, i32, i32, u32, u32, bool) {
-    if mode == "fit" {
+    if scale == "fit" {
         let scale = (scr_w as f64 / img_w as f64).min(scr_h as f64 / img_h as f64);
         let sw = (img_w as f64 * scale) as u32;
         let sh = (img_h as f64 * scale) as u32;
@@ -266,7 +272,7 @@ fn mode_set(
         let dy = ((scr_h - sh) as f32 * anchor_y) as i32;
         return (0, 0, img_w, img_h, dx, dy, sw, sh, true);
     }
-    if mode == "original" {
+    if scale == "original" {
         if img_w <= scr_w && img_h <= scr_h {
             let dx = ((scr_w - img_w) as f32 * anchor_x) as i32;
             let dy = ((scr_h - img_h) as f32 * anchor_y) as i32;
@@ -357,41 +363,26 @@ impl VulkanCore {
 // --------------------------------------------------------------------- / record commands
 
 impl VulkanCore {
-    pub(crate) fn record_commands(
-        &self,
-        f: impl FnOnce(vk::CommandBuffer),
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn record_commands(&self, f: impl FnOnce(vk::CommandBuffer))
+    -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
-            self.device
-                .reset_command_pool(self.command_pool, vk::CommandPoolResetFlags::empty())?;
+            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
         }
-
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         unsafe {
-            self.device
-                .begin_command_buffer(self.command_buffer, &begin_info)?;
+            self.device.begin_command_buffer(self.command_buffer, &begin_info)?;
         }
-
         f(self.command_buffer);
         unsafe {
             self.device.end_command_buffer(self.command_buffer)?;
         }
-
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(std::slice::from_ref(&self.command_buffer));
-        let fence = unsafe {
-            self.device
-                .create_fence(&vk::FenceCreateInfo::default(), None)?
-        };
+        let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&self.command_buffer));
         unsafe {
-            self.device
-                .queue_submit(self.graphics_queue, &[submit_info], fence)?;
-            self.device
-                .wait_for_fences(&[fence], true, u64::MAX)?;
-            self.device.destroy_fence(fence, None);
+            self.device.wait_for_fences(&[self.submit_fence], true, u64::MAX)?;
+            self.device.reset_fences(&[self.submit_fence])?;
+            self.device.queue_submit(self.graphics_queue, &[submit_info], self.submit_fence)?;
+            self.device.wait_for_fences(&[self.submit_fence], true, u64::MAX)?;
         }
-
         Ok(())
     }
 }
@@ -549,91 +540,43 @@ impl VulkanCore {
 // --------------------------------------------------------------------- / load texture
 
 impl VulkanCore {
-    fn load_texture(
-        &self,
-        buffer: vk::Buffer,
-        image: vk::Image,
-        width: u32,
-        height: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        unsafe {
-            self.device
-                .reset_command_pool(self.command_pool, vk::CommandPoolResetFlags::empty())?;
-        }
+    fn load_texture(&self, buffer: vk::Buffer, image: vk::Image, width: u32, height: u32)
+    -> Result<(), Box<dyn std::error::Error>> {
+        self.record_commands(|cmd| {
 
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        unsafe {
-            self.device
-                .begin_command_buffer(self.command_buffer, &begin_info)?;
-        }
-
-        // transition texture to transfer dst
-        self.image_barrier(
-            self.command_buffer,
-            image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            vk::AccessFlags::empty(),
-            vk::AccessFlags::TRANSFER_WRITE,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::TRANSFER,
-        );
-
-        // copy buffer to image
-        let region = vk::BufferImageCopy::default()
-            .buffer_offset(0)
-            .buffer_row_length(0)
-            .buffer_image_height(0)
-            .image_subresource(vk::ImageSubresourceLayers {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                mip_level: 0,
-                base_array_layer: 0,
-                layer_count: 1,
-            })
-            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-            .image_extent(vk::Extent3D { width, height, depth: 1 });
-        unsafe {
-            self.device.cmd_copy_buffer_to_image(
-                self.command_buffer,
-                buffer,
-                image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[region],
+            // transition texture to transfer dst
+            self.image_barrier(
+                cmd, image,
+                vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE,
+                vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
             );
-        }
 
-        // transition texture to shader read only
-        self.image_barrier(
-            self.command_buffer,
-            image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::AccessFlags::TRANSFER_WRITE,
-            vk::AccessFlags::SHADER_READ,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-        );
+            // copy buffer to image
+            let region = vk::BufferImageCopy::default()
+                .buffer_offset(0)
+                .buffer_row_length(0)
+                .buffer_image_height(0)
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0, base_array_layer: 0, layer_count: 1,
+                })
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D { width, height, depth: 1 });
+            unsafe {
+                self.device.cmd_copy_buffer_to_image(
+                    cmd, buffer, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region],
+                );
+            }
 
-        unsafe {
-            self.device.end_command_buffer(self.command_buffer)?;
-        }
-
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(std::slice::from_ref(&self.command_buffer));
-        let fence = unsafe {
-            self.device
-                .create_fence(&vk::FenceCreateInfo::default(), None)?
-        };
-        unsafe {
-            self.device
-                .queue_submit(self.graphics_queue, &[submit_info], fence)?;
-            self.device
-                .wait_for_fences(&[fence], true, u64::MAX)?;
-            self.device.destroy_fence(fence, None);
-        }
-
-        Ok(())
+            // transition texture to shader read only
+            self.image_barrier(
+                cmd, image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::SHADER_READ,
+                vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER,
+            );
+        })
     }
 }
 
@@ -690,11 +633,10 @@ impl VulkanCore {
         anchor_x: f32,
         anchor_y: f32,
         background: Option<(vk::Image, u32, u32)>,
-        mode: &str,
+        scale: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let swapchain_loader = ash::khr::swapchain::Device::new(&self.instance, &self.device);
         let (image_index, _suboptimal) = match unsafe {
-            swapchain_loader.acquire_next_image(
+            self.swapchain_loader.acquire_next_image(
                 surfchain.swapchain,
                 u64::MAX,
                 vk::Semaphore::null(),
@@ -735,13 +677,13 @@ impl VulkanCore {
                     vk::PipelineStageFlags::TRANSFER,
                 );
 
-                // compute source and destination rectangles based on mode
+                // compute source and destination rectangles based on scaling mode
                 let (src_x, src_y, src_w, src_h, dst_x, dst_y, dst_w, dst_h, needs_clear) =
-                    mode_set(
+                    scale_set(
                         texture.width, texture.height,
                         layer_width, layer_height,
                         anchor_x, anchor_y,
-                        mode,
+                        scale,
                     );
 
                 if needs_clear {
@@ -797,7 +739,7 @@ impl VulkanCore {
             .swapchains(std::slice::from_ref(&surfchain.swapchain))
             .image_indices(std::slice::from_ref(&image_index));
 
-        let result = unsafe { swapchain_loader.queue_present(self.graphics_queue, &present_info) };
+        let result = unsafe { self.swapchain_loader.queue_present(self.graphics_queue, &present_info) };
         match result {
             Ok(_) => Ok(()),
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
@@ -810,7 +752,16 @@ impl VulkanCore {
 }
 
 
-// --------------------------------------------------------------------- / destroy core
+// --------------------------------------------------------------------- / destroy
+
+impl VulkanCore {
+    pub fn destroy_texture(&self, texture: &VulkanTexture) {
+        unsafe {
+            self.device.destroy_image(texture.image, None);
+            self.device.free_memory(texture._memory, None);
+        }
+    }
+}
 
 pub fn destroy_wallbash(
     vk_core: &VulkanCore,
@@ -835,11 +786,8 @@ pub fn destroy_wallbash(
     if level >= 1 {
         if let Some(sc) = config.surfchain {
             unsafe {
-                let swapchain_loader =
-                    ash::khr::swapchain::Device::new(&vk_core.instance, &vk_core.device);
-                swapchain_loader.destroy_swapchain(sc.swapchain, None);
-                let surface_loader =
-                    ash::khr::surface::Instance::new(&vk_core.entry, &vk_core.instance);
+                vk_core.swapchain_loader.destroy_swapchain(sc.swapchain, None);
+                let surface_loader = ash::khr::surface::Instance::new(&vk_core.entry, &vk_core.instance);
                 surface_loader.destroy_surface(sc.surface, None);
             }
         }
@@ -854,11 +802,9 @@ pub fn destroy_wallbash(
             }
         }
         unsafe {
-            vk_core.device
-                .device_wait_idle()
-                .expect("device wait failed");
-            vk_core.device
-                .destroy_command_pool(vk_core.command_pool, None);
+            vk_core.device.device_wait_idle().expect("device wait failed");
+            vk_core.device.destroy_fence(vk_core.submit_fence, None);
+            vk_core.device.destroy_command_pool(vk_core.command_pool, None);
             vk_core.device.destroy_device(None);
             vk_core.instance.destroy_instance(None);
         }

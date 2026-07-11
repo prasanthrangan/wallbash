@@ -6,119 +6,46 @@
 
 // --------------------------------------------------------------------- / imports
 
-use crate::{vulkan, wayland, filters, colors};
+use crate::{ipc, wayland, vulkan, filters, transitions, colors};
 use ash::vk;
 use std::{
-    os::unix::net::{UnixListener, UnixStream},
-    io::{BufRead, BufReader},
-    sync::mpsc, time::Instant,
+    io::Write, time::Instant, collections::VecDeque,
+    os::unix::net::UnixStream,
+    sync::{mpsc,Arc},
 };
 
 
 // --------------------------------------------------------------------- / datatypes
 
-enum Command {
-    Stop,
-    Status,
-    Set { palette: String, mode: String, anchor_x: f32, anchor_y: f32, path: String },
-}
-
 struct DaemonState {
-    vk_core: vulkan::VulkanCore,
     wl_core: wayland::WaylandCore,
+    vk_core: vulkan::VulkanCore,
     vk_surfchain: Option<vulkan::VulkanSurfchain>,
     wallpaper: Option<vulkan::VulkanTexture>,
-    blur_module: vk::ShaderModule,
-    blur_pipeline: vk::Pipeline,
-    blur_desc_layout: vk::DescriptorSetLayout,
+    blur_state: BlurState,
+    transition_state: TransitionState,
+    decoded_cache: VecDeque<(String, image::DynamicImage)>,
+}
+
+struct BlurState {
+    device: Arc<ash::Device>,
+    module: vk::ShaderModule,
+    pipeline: vk::Pipeline,
+    desc_layout: vk::DescriptorSetLayout,
+}
+
+struct TransitionState {
+    device: Arc<ash::Device>,
+    scratch: vulkan::VulkanTexture,
+    registry: transitions::TransitionRegistry,
+    pending: Option<transitions::TransitionCore>,
 }
 
 
-// --------------------------------------------------------------------- / implementations
-
-impl Command {
-    fn parse_raw(raw: &str) -> Self {
-        let raw = raw.trim();
-        if raw == "stop"   { return Command::Stop; }
-        if raw == "status" { return Command::Status; }
-        if raw.starts_with("set") {
-            let payload = &raw[3..];
-            let mut parts = payload.splitn(5, '\x01');
-            let palette = parts.next().unwrap().to_string();
-            let mode = parts.next().unwrap().to_string();
-            let anchor_x = parts.next().unwrap().parse().unwrap();
-            let anchor_y = parts.next().unwrap().parse().unwrap();
-            let path = parts.next().unwrap().to_string();
-            return Command::Set { palette, mode, anchor_x, anchor_y, path };
-        }
-        panic!("unknown internal command: {}", raw);
-    }
-}
-
-impl DaemonState {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let wl_core = wayland::wayland_core()?;
-        let vk_core = vulkan::vulkan_core()?;
-        let (blur_module, blur_pipeline, blur_desc_layout) = filters::filter_pipeline(&vk_core.device, "blur")?;
-        let vk_surfchain = Some(set_surfchain(&vk_core, &wl_core, None)?);
-        Ok(Self {
-            vk_core,
-            wl_core,
-            vk_surfchain,
-            wallpaper: None,
-            blur_module,
-            blur_pipeline,
-            blur_desc_layout,
-        })
-    }
-}
-
-
-// --------------------------------------------------------------------- / listener
-
-fn start_ipc(socket_path: &str) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
-
-    // remove any stale socket file from a previous run
-    let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path)?;
-    let (tx, rx) = mpsc::channel::<String>();
-    println!("[ipc] listening: {}", socket_path);
-
-    // start listener thread
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    let reader = BufReader::new(stream);
-                    for line in reader.lines() {
-                        if let Ok(path) = line {
-                            let path = path.trim().to_string();
-                            if !path.is_empty() {
-                                if tx.send(path).is_err() {
-                                    return; // main thread has dropped the receiver
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[ipc] accept error: {}", e);
-                    break;
-                }
-            }
-        }
-    });
-
-    Ok(rx)
-}
-
-
-// --------------------------------------------------------------------- / timer
+// --------------------------------------------------------------------- / benchmarking
 
 fn timer<F, R>(label: &str, f: F) -> R
-where
-    F: FnOnce() -> R,
-{
+where F: FnOnce() -> R {
     let start = Instant::now();
     let result = f();
     println!("[perf] {}: {:.2?}", label, start.elapsed());
@@ -126,233 +53,311 @@ where
 }
 
 
-// --------------------------------------------------------------------- / wallpaper
+// --------------------------------------------------------------------- / blur state
 
-fn set_wallpaper(
-    path: &str,
-    vk_core: &vulkan::VulkanCore,
-    vk_surfchain: &vulkan::VulkanSurfchain,
-    layer_width: u32,
-    layer_height: u32,
-    wallpaper: &mut Option<vulkan::VulkanTexture>,
-    anchor_x: f32,
-    anchor_y: f32,
-    mode: &str,
-    effect: impl FnOnce(&vulkan::VulkanTexture) -> Option<vulkan::VulkanTexture>,
-    palette: &String,
-) -> Result<(), Box<dyn std::error::Error>> {
+impl BlurState {
+    fn new(vk_core: &vulkan::VulkanCore) -> Result<Self, Box<dyn std::error::Error>> {
+        let device = Arc::clone(&vk_core.device);
+        let (module, pipeline, desc_layout) = filters::filter_pipeline(&device, "blur")?;
+        Ok(Self { device, module, pipeline, desc_layout })
+    }
+}
 
-    // load the wallpaper
-    let (img, pixel_bytes) = timer("load+decode", || {
-        let img = image::open(path)?;
-        let rgba = img.to_rgba8();
-        let bytes = rgba.into_raw();
-        Ok::<_, Box<dyn std::error::Error>>((img, bytes))
-    })?;
-
-    // call the vulkan pipeline
-    let texture = timer("upload", || {
-        vk_core.upload_texture(&pixel_bytes, img.width(), img.height())
-    })?;
-
-    // drop the old texture resources (if any)
-    if let Some(old_tex) = wallpaper.take() {
+impl Drop for BlurState {
+    fn drop(&mut self) {
         unsafe {
-            vk_core.device.destroy_image(old_tex.image, None);
-            vk_core.device.free_memory(old_tex._memory, None);
+            self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_descriptor_set_layout(self.desc_layout, None);
+            self.device.destroy_shader_module(self.module, None);
         }
     }
-    *wallpaper = Some(texture);
+}
 
-    // create a blurred version for fit/original modes
-    let background_texture = timer("effect+draw", || {
-        let bg = effect(wallpaper.as_ref().unwrap());
-        let bg_params = bg.as_ref().map(|b| (b.image, b.width, b.height));
 
-        vk_core.draw_wallpaper(
-            vk_surfchain,
-            wallpaper.as_ref().unwrap(),
+// --------------------------------------------------------------------- / transition state
+
+impl TransitionState {
+    fn new(
+        vk_core: &vulkan::VulkanCore,
+        layer_width: u32,
+        layer_height: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let device = Arc::clone(&vk_core.device);
+        let (img, mem) = vk_core.create_texture(
             layer_width,
             layer_height,
+            ash::vk::ImageUsageFlags::TRANSFER_SRC | ash::vk::ImageUsageFlags::STORAGE,
+            ash::vk::Format::R8G8B8A8_UNORM,
+        )?;
+        let scratch = vulkan::VulkanTexture {
+            image: img,
+            _memory: mem,
+            width: layer_width,
+            height: layer_height,
+        };
+        let registry = transitions::TransitionRegistry::new(&device)?;
+        Ok(Self {
+            device,
+            scratch,
+            registry,
+            pending: None,
+        })
+    }
+}
+
+impl TransitionState {
+    pub fn start(
+        &mut self,
+        vk_core: &vulkan::VulkanCore,
+        old: vulkan::VulkanTexture,
+        new_tex: &vulkan::VulkanTexture,
+        bezier: &str,
+        scale: ipc::ScalingMode,
+        anchor_x: f32,
+        anchor_y: f32,
+        background: Option<vulkan::VulkanTexture>,
+    ) {
+        let cfg = transitions::TransitionConfig::parse("zoom", 400, bezier);
+        let target_fps = 60.0_f64;
+        let total_frames = ((cfg.duration_ms as f64 / 1000.0) * target_fps).ceil() as u32;
+
+        let anim = self.registry.get(&cfg.kind);
+        let resources = match anim.prepare(vk_core, &old, new_tex, &self.scratch) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[wallbash] error preparing transition: {}", e);
+                transitions::TransitionResources::None
+            }
+        };
+
+        self.pending = Some(transitions::TransitionCore {
+            cfg,
+            prev: old,
+            start: Instant::now(),
+            total_frames,
+            current_frame: 0,
+            scale: scale.as_str().to_string(),
             anchor_x,
             anchor_y,
-            bg_params,
-            mode,
-        )?;
+            background,
+            resources,
+        });
+    }
+}
 
-        Ok::<_, Box<dyn std::error::Error>>(bg)
-    })?;
+impl TransitionState {
+    pub fn advance(
+        &mut self,
+        vk_core: &vulkan::VulkanCore,
+        wl_core: &wayland::WaylandCore,
+        vk_surfchain: &vulkan::VulkanSurfchain,
+    ) {
+        let pending = match self.pending.as_mut() {
+            Some(p) => p,
+            None => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                return;
+            }
+        };
 
-    // destroy the temporary blurred texture (if any)
-    if let Some(bg) = background_texture {
-        unsafe {
-            vk_core.device.destroy_image(bg.image, None);
-            vk_core.device.free_memory(bg._memory, None);
+        if pending.current_frame <= pending.total_frames {
+            let raw_t = (pending.current_frame as f32 / pending.total_frames as f32).clamp(0.0, 1.0);
+            let t = pending.cfg.bezier.apply(raw_t);
+
+            let anim = self.registry.get(&pending.cfg.kind);
+            if let Err(e) = anim.render_frame(
+                &vk_core,
+                &pending.resources,
+                t,
+                &pending.scale,
+                pending.anchor_x,
+                pending.anchor_y,
+            ) { eprintln!("[wallbash] transition frame error: {}", e); }
+
+            let bg_params = pending.background.as_ref().map(|b| (b.image, b.width, b.height));
+            if let Err(e) = vk_core.draw_wallpaper(
+                vk_surfchain,
+                &self.scratch,
+                wl_core.state.layer_width,
+                wl_core.state.layer_height,
+                pending.anchor_x,
+                pending.anchor_y,
+                bg_params,
+                &pending.scale,
+            ) { eprintln!("[wallbash] error drawing transition frame: {}", e); }
+
+            pending.current_frame += 1;
+            let frame_duration = std::time::Duration::from_secs_f64(1.0 / 60.0);
+            let elapsed = pending.start.elapsed();
+            let target = frame_duration.mul_f64((pending.current_frame + 1) as f64);
+            if elapsed < target {
+                std::thread::sleep(target - elapsed);
+            }
+        } else {
+            self.cancel(vk_core);
         }
     }
+}
 
-    // generate colors
-    if palette != "skip" {
-        timer("dcols", || colors::dcol(&img, palette));
+impl TransitionState {
+    pub fn cancel(&mut self, vk_core: &vulkan::VulkanCore) {
+        if let Some(mut core) = self.pending.take() {
+            vk_core.destroy_texture(&core.prev);
+            if let Some(bg) = core.background.take() {
+                vk_core.destroy_texture(&bg);
+            }
+            let anim = self.registry.get(&core.cfg.kind);
+            anim.cleanup(&vk_core.device, core.resources);
+        }
     }
+}
 
-    Ok(())
+impl Drop for TransitionState {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_image(self.scratch.image, None);
+            self.device.free_memory(self.scratch._memory, None);
+        }
+        self.registry.destroy(&self.device);
+    }
 }
 
 
-// --------------------------------------------------------------------- / surfchain
+// --------------------------------------------------------------------- / daemon state
 
-fn set_surfchain(
-    vk_core: &vulkan::VulkanCore,
-    wl_core: &wayland::WaylandCore,
-    old: Option<vulkan::VulkanSurfchain>,
-) -> Result<vulkan::VulkanSurfchain, Box<dyn std::error::Error>> {
+impl DaemonState {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let wl_core = wayland::wayland_core()?;
+        let vk_core = vulkan::vulkan_core()?;
+        let blur_state = BlurState::new(&vk_core)?;
+        let vk_surfchain = Some(vulkan::vulkan_surfchain(
+            &vk_core, &wl_core.display, &wl_core.surface, wl_core.state.layer_width, wl_core.state.layer_height
+        )?);
 
-    // destroy only the swapchain (level 1) – no filter resources
-    if let Some(old_sc) = old {
-        vulkan::destroy_wallbash(
+        let transition_state = TransitionState::new(
+            &vk_core,
+            wl_core.state.layer_width,
+            wl_core.state.layer_height,
+        )?;
+
+        Ok(Self {
+            wl_core,
             vk_core,
-            vulkan::VulkanCleanup {
-                surfchain: Some(old_sc),
-                filter_module: None,
-                filter_pipeline: None,
-                filter_desc_layout: None,
-                wallpaper_texture: None,
-            },
-            1,
-        );
+            vk_surfchain,
+            wallpaper: None,
+            blur_state,
+            transition_state,
+            decoded_cache: VecDeque::new(),
+        })
     }
-
-    vulkan::vulkan_surfchain(
-        &vk_core.entry,
-        &vk_core.instance,
-        vk_core.physical_device,
-        vk_core.graphics_family_index,
-        &vk_core.device,
-        &wl_core.display,
-        &wl_core.surface,
-        wl_core.state.layer_width,
-        wl_core.state.layer_height,
-    )
 }
 
-
-// --------------------------------------------------------------------- / command
+impl DaemonState {
+    fn load(&mut self, path: &str) -> Result<(image::DynamicImage, Vec<u8>), Box<dyn std::error::Error>> {
+        let cache_hit = self.decoded_cache.iter().position(|(p, _)| p == path);
+        let label = if cache_hit.is_some() { "load-cached" } else { "load+decode" };
+        
+        timer(label, || -> Result<_, Box<dyn std::error::Error>> {
+            let img = if let Some(idx) = cache_hit {
+                self.decoded_cache.remove(idx).expect("cache index invalid")
+            } else {
+                (path.to_string(), image::open(path)?)
+            }.1;
+            
+            let bytes = img.to_rgba8().into_raw();
+            self.decoded_cache.push_back((path.to_string(), img.clone()));
+            if self.decoded_cache.len() > 30 { self.decoded_cache.pop_front(); }
+            
+            Ok((img, bytes))
+        })
+    }
+}
 
 impl DaemonState {
     fn set_command(
         &mut self,
-        palette: String,
-        mode: String,
-        anchor_x: f32,
-        anchor_y: f32,
-        path: String,
-    ) -> Result<(), ()> {
-        let resolved = std::fs::canonicalize(&path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or(path);
-        println!("[wallbash] loading '{}' ({}|{}|ax:{:.1}|ay:{:.1})", resolved, palette, mode, anchor_x, anchor_y);
+        palette: ipc::PaletteMode,
+        bezier: String,
+        scale: ipc::ScalingMode,
+        ax: f32,
+        ay: f32,
+        path: String
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let resolved = std::fs::canonicalize(&path).map(|p| p.to_string_lossy().to_string()).unwrap_or(path);
+        println!("[wallbash] loading '{}' | {:?} | {:?} | bz:{} | a(x,y):({:.1},{:.1})", resolved, palette, scale, bezier, ax, ay);
 
-        let effect = |tex: &vulkan::VulkanTexture| {
-            if mode != "cover" {
+        self.transition_state.cancel(&self.vk_core);
+        let (img, pixel_bytes) = self.load(&resolved)?;
+        println!("[wallbash] decoded images: {}/30", self.decoded_cache.len());
+
+        let texture = timer("upload", || self.vk_core.upload_texture(&pixel_bytes, img.width(), img.height()))?;
+
+        let background = if scale != ipc::ScalingMode::Cover {
+            timer("blur", || {
                 filters::blur_texture(
                     &self.vk_core,
-                    tex,
-                    tex.width,
-                    tex.height,
-                    self.blur_pipeline,
-                    self.blur_desc_layout,
-                )
-                .ok()
-            } else { None }
-        };
+                    &texture,
+                    texture.width,
+                    texture.height,
+                    self.blur_state.pipeline,
+                    self.blur_state.desc_layout
+                ).ok().map(|b| vulkan::VulkanTexture { image: b.image, _memory: b._memory, width: b.width, height: b.height })
+            })
+        } else { None };
 
-        match set_wallpaper(
-            &resolved,
-            &self.vk_core,
+        if palette != ipc::PaletteMode::Skip {
+            let p_str = palette.as_str();
+            std::thread::spawn(move || { let _ = timer("dcols", || colors::dcol(&img, p_str)); });
+        }
+
+        let old_tex = self.wallpaper.replace(texture);
+        let new_tex = self.wallpaper.as_ref().ok_or_else(|| "[error] wallpaper state corruption")?;
+
+        if let Some(old) = old_tex {
+            self.transition_state.start(&self.vk_core, old, new_tex, &bezier, scale, ax, ay, background);
+        } else {
+            let bg_params = background.as_ref().map(|b| (b.image, b.width, b.height));
+            self.vk_core.draw_wallpaper(
             self.vk_surfchain.as_ref().unwrap(),
+            new_tex,
             self.wl_core.state.layer_width,
             self.wl_core.state.layer_height,
-            &mut self.wallpaper,
-            anchor_x,
-            anchor_y,
-            &mode,
-            effect,
-            &palette,
-        ) {
-            Ok(()) => {
-                println!("[wallbash] wallpaper set.");
-                Ok(())
-            }
-            Err(e) if e.to_string().contains("out of date") => {
-                println!("[wallbash] swapchain out of date, recreating...");
-
-                match vulkan::vulkan_surfchain(
-                    &self.vk_core.entry,
-                    &self.vk_core.instance,
-                    self.vk_core.physical_device,
-                    self.vk_core.graphics_family_index,
-                    &self.vk_core.device,
-                    &self.wl_core.display,
-                    &self.wl_core.surface,
-                    self.wl_core.state.layer_width,
-                    self.wl_core.state.layer_height,
-                ) {
-                    Ok(new_sc) => {
-                        let old = self.vk_surfchain.take().unwrap();
-                        vulkan::destroy_wallbash(
-                            &self.vk_core,
-                            vulkan::VulkanCleanup {
-                                surfchain: Some(old),
-                                filter_module: None,
-                                filter_pipeline: None,
-                                filter_desc_layout: None,
-                                wallpaper_texture: None,
-                            },
-                            1,
-                        );
-                        self.vk_surfchain = Some(new_sc);
-                    }
-                    Err(e2) => {
-                        eprintln!("[wallbash] failed to recreate swapchain {}", e2);
-                        return Err(());
-                    }
-                }
-
-                if let Err(e3) = set_wallpaper(
-                    &resolved,
-                    &self.vk_core,
-                    self.vk_surfchain.as_ref().unwrap(),
-                    self.wl_core.state.layer_width,
-                    self.wl_core.state.layer_height,
-                    &mut self.wallpaper,
-                    anchor_x,
-                    anchor_y,
-                    &mode,
-                    effect,
-                    &palette,
-                ) {
-                    eprintln!("[wallbash] error after swapchain recreation {}", e3);
-                }
-                Ok(())
-            }
-            Err(e) => {
-                eprintln!("[wallbash] error {}", e);
-                Ok(())
-            }
+            ax,
+            ay,
+            bg_params,
+            scale.as_str())?;
         }
+
+        println!("[wallbash] wallpaper set.");
+        Ok(())
+    }
+}
+
+impl Drop for DaemonState {
+    fn drop(&mut self) {
+        vulkan::destroy_wallbash(
+            &self.vk_core,
+            vulkan::VulkanCleanup {
+                surfchain: self.vk_surfchain.take(),
+                filter_module: None,
+                filter_pipeline: None,
+                filter_desc_layout: None,
+                wallpaper_texture: self.wallpaper.take(),
+            },
+            2,
+        );
+        println!("[wallbash] GPU resources safely released.");
     }
 }
 
 
-// --------------------------------------------------------------------- / daemon
+// --------------------------------------------------------------------- / daemon run
 
 pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     if UnixStream::connect(socket_path).is_ok() {
         return Err("Daemon is already running.".into());
     }
-    let _ = std::fs::remove_file(socket_path);
-    let rx = start_ipc(socket_path)?;
+    let rx: mpsc::Receiver<ipc::IpcMessage> = ipc::start_ipc(socket_path)?;
 
     let mut state = DaemonState::new()?;
     println!("[wallbash] ready, press Ctrl+C to quit.");
@@ -360,37 +365,37 @@ pub fn run(socket_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut running = true;
     while running {
         state.wl_core.event.dispatch_pending(&mut state.wl_core.state)?;
-        if let Ok(raw) = rx.try_recv() {
-            match Command::parse_raw(&raw) {
-                Command::Stop => {
+
+        if let Ok(mut msg) = rx.try_recv() {
+            match ipc::Command::parse_raw(&msg.cmd) {
+                Ok(ipc::Command::Stop) => {
                     println!("[wallbash] stopping daemon.");
                     running = false;
                 }
-                Command::Status => {
-                    println!("[wallbash] daemon is running.");
-                }
-                Command::Set { palette, mode, anchor_x, anchor_y, path } => {
-                    if state.set_command(palette, mode, anchor_x, anchor_y, path).is_err()
-                    {
-                        continue;
+                Ok(ipc::Command::Set { .. }) => {
+                    let mut last_msg = msg;
+                    while let Ok(new_msg) = rx.try_recv() {
+                        if matches!(ipc::Command::parse_raw(&new_msg.cmd), Ok(ipc::Command::Set { .. })) {
+                            last_msg = new_msg;
+                        } else {
+                            break;
+                        }
                     }
+                    if let Ok(ipc::Command::Set { palette, bezier, scale, anchor_x, anchor_y, path }) = ipc::Command::parse_raw(&last_msg.cmd) {
+                        let result = state.set_command(palette, bezier, scale, anchor_x, anchor_y, path);
+                        let _ = last_msg.stream.write(&[0u8]);
+                        let _ = last_msg.stream.set_nonblocking(true);
+                        if result.is_err() { continue; }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[ipc] invalid command: {}", e);
+                    let _ = msg.stream.write(&[0u8]);
                 }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(16));
+        state.transition_state.advance(&state.vk_core, &state.wl_core, state.vk_surfchain.as_ref().unwrap());
     }
-
-    vulkan::destroy_wallbash(
-        &state.vk_core,
-        vulkan::VulkanCleanup {
-            surfchain: state.vk_surfchain.take(),
-            filter_module: Some(state.blur_module),
-            filter_pipeline: Some(state.blur_pipeline),
-            filter_desc_layout: Some(state.blur_desc_layout),
-            wallpaper_texture: state.wallpaper.take(),
-        },
-        2,
-    );
 
     println!("[wallbash] daemon stopped.");
     Ok(())

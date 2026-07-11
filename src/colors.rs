@@ -615,6 +615,7 @@ fn deploy_palette(colors: &[ColorPalette]) {
     let mut handles = Vec::new();
     for (out, cmd, rendered) in deployments {
         handles.push(std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
 
             // resolve target file
             let resolved_path = out.as_deref().and_then(|p| eval_shell(p));
@@ -633,7 +634,6 @@ fn deploy_palette(colors: &[ColorPalette]) {
                 eprintln!("[shell] failed to write {} {}", target, e);
                 return;
             }
-            println!("[shell] deployed -> {}", target);
 
             // execute post deployment command
             if let Some(post_cmd) = &cmd {
@@ -643,6 +643,7 @@ fn deploy_palette(colors: &[ColorPalette]) {
                     eprintln!("[shell] failed to resolve {}", post_cmd);
                 }
             }
+            println!("[shell] deployed in {:.2?} -> {}", t0.elapsed(), target);
         }));
     }
 
