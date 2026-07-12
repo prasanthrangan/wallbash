@@ -1,6 +1,6 @@
 // --------------------------------------------------------------------- / tittu
 // wallbash
-// a transitions module for HyDE
+// a transition module for HyDE
 //
 
 
@@ -29,7 +29,7 @@ pub struct TransitionConfig {
 
 pub enum TransitionResources {
     None,
-    Zoom(ZoomFrameResources),
+    Zoom(ZoomResources),
 }
 
 pub struct TransitionCore {
@@ -45,7 +45,7 @@ pub struct TransitionCore {
     pub resources: TransitionResources,
 }
 
-pub struct ZoomFrameResources {
+pub struct ZoomResources {
     sampler: vk::Sampler,
     prev_view: vk::ImageView,
     next_view: vk::ImageView,
@@ -110,9 +110,6 @@ impl CubicBezier {
         3.0 * t * t * a + 6.0 * t * s * (b - a) + 3.0 * s2 * (1.0 - b)
     }
 }
-
-
-// --------------------------------------------------------------------- / config
 
 impl TransitionConfig {
     pub fn parse(kind: &str, duration_ms: u64, bezier_str: &str) -> Self {
@@ -254,12 +251,12 @@ impl Transition for TransitionNone {
     ) -> Result<TransitionResources, Box<dyn Error>> {
         vk_core.record_commands(|cmd| {
 
-            barrier(vk_core, cmd, next.image,
+            vk_core.image_barrier(cmd, next.image,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 vk::AccessFlags::SHADER_READ, vk::AccessFlags::TRANSFER_READ,
                 vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
             );
-            barrier(vk_core, cmd, output.image,
+            vk_core.image_barrier(cmd, output.image,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::AccessFlags::SHADER_READ, vk::AccessFlags::TRANSFER_WRITE,
                 vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
@@ -278,12 +275,12 @@ impl Transition for TransitionNone {
                 );
             }
 
-            barrier(vk_core, cmd, next.image,
+            vk_core.image_barrier(cmd, next.image,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 vk::AccessFlags::TRANSFER_READ, vk::AccessFlags::SHADER_READ,
                 vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::COMPUTE_SHADER,
             );
-            barrier(vk_core, cmd, output.image,
+            vk_core.image_barrier(cmd, output.image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::SHADER_READ,
                 vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -307,100 +304,70 @@ impl Transition for TransitionNone {
 }
 
 
-// --------------------------------------------------------------------- / shared dispatch
-
-fn dispatch_zoom_frame(
-    vk_core: &VulkanCore,
-    pipeline: &TransitionPipeline,
-    res: &ZoomFrameResources,
-    t: f32,
-    max_zoom: f32,
-    mode: &str,
-    anchor_x: f32,
-    anchor_y: f32,
-) -> Result<(), Box<dyn Error>> {
-    let device = &vk_core.device;
-    let w = res.dst_w as u32;
-    let h = res.dst_h as u32;
-
-    vk_core.record_commands(|cmd| {
-        barrier(vk_core, cmd, res.output_image,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::GENERAL,
-            vk::AccessFlags::SHADER_READ, vk::AccessFlags::SHADER_WRITE,
-            vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::COMPUTE_SHADER,
-        );
-
-        unsafe {
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline.pipeline);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, pipeline.pipe_layout, 0, &[res.desc_set], &[]);
-
-            let mode_id: i32 = match mode {
-                "cover"    => 0,
-                "fit"      => 1,
-                "original" => 2,
-                _          => 0,
-            };
-            let mut push_data = [0u8; 44];
-            push_data[ 0.. 4].copy_from_slice(&t.to_ne_bytes());
-            push_data[ 4.. 8].copy_from_slice(&max_zoom.to_ne_bytes());
-            push_data[ 8..12].copy_from_slice(&res.old_w.to_ne_bytes());
-            push_data[12..16].copy_from_slice(&res.old_h.to_ne_bytes());
-            push_data[16..20].copy_from_slice(&res.new_w.to_ne_bytes());
-            push_data[20..24].copy_from_slice(&res.new_h.to_ne_bytes());
-            push_data[24..28].copy_from_slice(&res.dst_w.to_ne_bytes());
-            push_data[28..32].copy_from_slice(&res.dst_h.to_ne_bytes());
-            push_data[32..36].copy_from_slice(&mode_id.to_ne_bytes());
-            push_data[36..40].copy_from_slice(&anchor_x.to_ne_bytes());
-            push_data[40..44].copy_from_slice(&anchor_y.to_ne_bytes());
-
-            device.cmd_push_constants(cmd, pipeline.pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, &push_data);
-            device.cmd_dispatch(cmd, (w + 15) / 16, (h + 15) / 16, 1);
-        }
-
-        barrier(vk_core, cmd, res.output_image,
-            vk::ImageLayout::GENERAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::SHADER_READ,
-            vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::COMPUTE_SHADER,
-        );
-    })?;
-
-    Ok(())
-}
-
-fn barrier(
-    vk_core: &VulkanCore,
-    cmd: vk::CommandBuffer,
-    image: vk::Image,
-    old: vk::ImageLayout,
-    new: vk::ImageLayout,
-    src_acc: vk::AccessFlags,
-    dst_acc: vk::AccessFlags,
-    src_stage: vk::PipelineStageFlags,
-    dst_stage: vk::PipelineStageFlags,
-) {
-    let b = vk::ImageMemoryBarrier::default()
-        .image(image)
-        .old_layout(old).new_layout(new)
-        .src_access_mask(src_acc).dst_access_mask(dst_acc)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0, level_count: 1,
-            base_array_layer: 0, layer_count: 1,
-        });
-    unsafe {
-        vk_core.device.cmd_pipeline_barrier(
-            cmd, src_stage, dst_stage, vk::DependencyFlags::empty(), &[], &[], &[b],
-        );
-    }
-}
-
-
 // --------------------------------------------------------------------- / zoom
 
 impl TransitionZoom {
-    pub fn new(device: &ash::Device) -> Result<Self, Box<dyn Error>> {
+    fn new(device: &ash::Device) -> Result<Self, Box<dyn Error>> {
         let spv = spv_words(include_bytes!(concat!(env!("OUT_DIR"), "/zoom.comp.spv")));
         Ok(Self { pipeline: TransitionPipeline::new(device, &spv)? })
+    }
+
+    fn dispatch_frame(
+        &self,
+        vk_core: &VulkanCore,
+        res: &ZoomResources,
+        t: f32,
+        max_zoom: f32,
+        mode: &str,
+        anchor_x: f32,
+        anchor_y: f32,
+    ) -> Result<(), Box<dyn Error>> {
+        let device = &vk_core.device;
+        let w = res.dst_w as u32;
+        let h = res.dst_h as u32;
+
+        vk_core.record_commands(|cmd| {
+            vk_core.image_barrier(cmd, res.output_image,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::GENERAL,
+                vk::AccessFlags::SHADER_READ, vk::AccessFlags::SHADER_WRITE,
+                vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::COMPUTE_SHADER,
+            );
+
+            unsafe {
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline.pipeline);
+                device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline.pipe_layout, 0, &[res.desc_set], &[]);
+
+                let mode_id: i32 = match mode {
+                    "cover"    => 0,
+                    "fit"      => 1,
+                    "original" => 2,
+                    _          => 0,
+                };
+                let mut push_data = [0u8; 44];
+                push_data[ 0.. 4].copy_from_slice(&t.to_ne_bytes());
+                push_data[ 4.. 8].copy_from_slice(&max_zoom.to_ne_bytes());
+                push_data[ 8..12].copy_from_slice(&res.old_w.to_ne_bytes());
+                push_data[12..16].copy_from_slice(&res.old_h.to_ne_bytes());
+                push_data[16..20].copy_from_slice(&res.new_w.to_ne_bytes());
+                push_data[20..24].copy_from_slice(&res.new_h.to_ne_bytes());
+                push_data[24..28].copy_from_slice(&res.dst_w.to_ne_bytes());
+                push_data[28..32].copy_from_slice(&res.dst_h.to_ne_bytes());
+                push_data[32..36].copy_from_slice(&mode_id.to_ne_bytes());
+                push_data[36..40].copy_from_slice(&anchor_x.to_ne_bytes());
+                push_data[40..44].copy_from_slice(&anchor_y.to_ne_bytes());
+
+                device.cmd_push_constants(cmd, self.pipeline.pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, &push_data);
+                device.cmd_dispatch(cmd, (w + 15) / 16, (h + 15) / 16, 1);
+            }
+
+            vk_core.image_barrier(cmd, res.output_image,
+                vk::ImageLayout::GENERAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::SHADER_READ,
+                vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::COMPUTE_SHADER,
+            );
+        })?;
+
+        Ok(())
     }
 }
 
@@ -453,7 +420,7 @@ impl Transition for TransitionZoom {
         ];
         unsafe { device.update_descriptor_sets(&writes, &[]); }
 
-        Ok(TransitionResources::Zoom(ZoomFrameResources {
+        Ok(TransitionResources::Zoom(ZoomResources {
             sampler, prev_view, next_view, output_view,
             output_image: output.image,
             desc_pool, desc_set,
@@ -476,7 +443,7 @@ impl Transition for TransitionZoom {
             TransitionResources::Zoom(r) => r,
             _ => return Err("zoom_focus: prepare() was not called with matching resources".into()),
         };
-        dispatch_zoom_frame(vk_core, &self.pipeline, res, t, 0.2, mode, anchor_x, anchor_y)
+        self.dispatch_frame(vk_core, res, t, 0.2, mode, anchor_x, anchor_y)
     }
 
     fn cleanup(&self, device: &ash::Device, resources: TransitionResources) {
@@ -515,9 +482,6 @@ impl TransitionRegistry {
         for t in &self.transitions { t.destroy(device); }
     }
 }
-
-
-// --------------------------------------------------------------------- / helpers
 
 fn spv_words(bytes: &[u8]) -> Vec<u32> {
     bytes.chunks_exact(4)
