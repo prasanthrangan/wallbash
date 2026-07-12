@@ -324,7 +324,7 @@ impl VulkanCore {
 // --------------------------------------------------------------------- / image barrier
 
 impl VulkanCore {
-    fn image_barrier(
+    pub fn image_barrier(
         &self,
         command_buffer: vk::CommandBuffer,
         image: vk::Image,
